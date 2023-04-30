@@ -1,4 +1,6 @@
 #include <xi/xi.h>
+#include "nav_mesh.c"
+#include "nav_mesh_data.h"
 
 extern XI_EXPORT XI_GAME_INIT(xiContext *xi, xi_u32 type) {
     switch (type) {
@@ -9,7 +11,8 @@ extern XI_EXPORT XI_GAME_INIT(xiContext *xi, xi_u32 type) {
         break;
         case XI_GAME_INIT: {
             // @todo: init game here
-            //
+            // TODO: @todo remove this debug path finding call
+			generateRoute(&NAV_MESH, 0, 5991);
         }
         break;
         case XI_GAME_RELOADED: {
@@ -33,5 +36,6 @@ extern XI_EXPORT XI_GAME_RENDER(xiContext *xi, xiRenderer *renderer) {
 
     // draw red square
     //
-    xi_quad_draw_xy(renderer, xi_v4_create(1, 0, 0, 1), xi_v2_create(0, 0), xi_v2_create(1, 1), 0);
+    xi_quad_draw_xy(renderer, xi_v4_create(1, 1, 0, 1), xi_v2_create(0, 0), xi_v2_create(1, 1), 0);
+
 }
