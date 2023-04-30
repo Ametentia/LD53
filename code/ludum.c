@@ -2,19 +2,19 @@
 
 #include "nav_mesh.c"
 
-#include "ludum_util.c"
 #include "ludum_mode_play.c"
 
 extern XI_EXPORT XI_GAME_INIT(xiContext *xi, xi_u32 type) {
     XI_ASSERT(xi->version.major == XI_VERSION_MAJOR);
     XI_ASSERT(xi->version.minor == XI_VERSION_MINOR);
+    XI_ASSERT(xi->version.patch == XI_VERSION_PATCH);
 
     switch (type) {
         case XI_ENGINE_CONFIGURE: {
             xiArena *temp = xi_temp_get();
 
-            xi->window.width  = 1280;
-            xi->window.height = 720;
+            xi->window.width  = 1600;
+            xi->window.height = 900;
 
             xi->time.delta.fixed_hz = 60;
 
@@ -90,6 +90,17 @@ extern XI_EXPORT XI_GAME_INIT(xiContext *xi, xi_u32 type) {
 
 extern XI_EXPORT XI_GAME_SIMULATE(xiContext *xi) {
     ldContext *ld = xi->user;
+
+    xiInputKeyboard *kb = &xi->keyboard;
+
+    if (kb->alt && kb->keys['f'].pressed) {
+        if (xi->window.state == XI_WINDOW_STATE_FULLSCREEN) {
+            xi->window.state = XI_WINDOW_STATE_WINDOWED;
+        }
+        else {
+            xi->window.state = XI_WINDOW_STATE_FULLSCREEN;
+        }
+    }
 
     if (ld) {
         switch (ld->mode) {

@@ -1,5 +1,5 @@
-#define LD_DEFAULT_MIN_ZOOM 3.5f
-#define LD_DEFAULT_MAX_ZOOM 4.5f
+#define LD_DEFAULT_MIN_ZOOM 12.0f
+#define LD_DEFAULT_MAX_ZOOM 4.5f // @incomplete: this will break when we limit zoom
 #define LD_TOTAL_MAX_ZOOM   28.5f
 
 #define LD_AMBIENT_MUSIC_TAG 0x3322
@@ -60,6 +60,8 @@ struct ldModePlay {
     xiSoundHandle static_long;
     xiSoundHandle static_short;
 
+    xiImageHandle map;
+
     v2 p;
     f32 angle;
 
@@ -76,6 +78,8 @@ static void ludum_music_layers_configure(ldModePlay *play, xiContext *xi) {
     //
     xiSoundHandle ambient = xi_sound_get_by_name(assets, "ambient_01");
     xi_music_layer_add(audio, ambient, LD_AMBIENT_MUSIC_TAG);
+
+    xi_music_layer_enable_by_index(audio, 0, XI_MUSIC_LAYER_EFFECT_INSTANT, 0);
 
     for (u32 i = 0; i < LD_MUSIC_TYPE_COUNT; ++i) {
         ldMusicTag normal, radio;
@@ -179,10 +183,10 @@ static void ludum_mode_play_init(ldContext *ld) {
         v3 y = xi_v3_create(0, 1, 0);
         v3 z = xi_v3_create(0, 0, 1);
 
-        v3 p = xi_v3_create(0, 0, LD_TOTAL_MAX_ZOOM * 1.25f); // only be able to see 80% of the full map
+        v3 p = xi_v3_create(0, 0, LD_TOTAL_MAX_ZOOM);
 
         xiCameraTransform full_map;
-        ludum_camera_transform_get_from_axes(&full_map, aspect, x, y, z, p, 0);
+        xi_camera_transform_get_from_axes(&full_map, aspect, x, y, z, p, 0);
 
         rect3 bounds = xi_camera_bounds_get(&full_map);
 
@@ -193,6 +197,8 @@ static void ludum_mode_play_init(ldContext *ld) {
         play->static_short = xi_sound_get_by_name(&xi->assets, "static_short");
 
         ludum_music_layers_configure(play, xi);
+
+        play->map = xi_image_get_by_name(&xi->assets, "map_details");
 
         ld->mode = LD_MODE_PLAY;
     }
@@ -238,7 +244,7 @@ static void ludum_mode_play_simulate(ldModePlay *play) {
     v3 p = xi_v3_from_v2(play->camera_p, play->zoom);
 
     xiCameraTransform camera;
-    ludum_camera_transform_get_from_axes(&camera, aspect, x, y, z, p, 0);
+    xi_camera_transform_get_from_axes(&camera, aspect, x, y, z, p, 0);
 
     // prevent the camera from leaving the map area
     //
@@ -326,20 +332,15 @@ static void ludum_mode_play_render(ldModePlay *play, xiRenderer *renderer) {
 
     v3 p = xi_v3_from_v2(play->camera_p, play->zoom);
 
-    xi_camera_transform_set_axes(renderer, x, y, z, p, 0);
-
-    rect3 bounds = xi_camera_bounds_get(&renderer->camera);
-
-    v4 bg     = xi_v4_create(0.18f, 0.18f, 0.18f, 1.0f);
-    v2 center = xi_v2_mul_f32(xi_v2_add(bounds.max.xy, bounds.min.xy), 0.5f);
-    v2 dim    = xi_v2_mul_f32(xi_v2_sub(bounds.max.xy, bounds.min.xy), 1.25f);
-
-    xi_quad_draw_xy(renderer, bg, center, dim, 0);
+    xi_camera_transform_set_from_axes(renderer, x, y, z, p, 0);
 
     {
         xi_v2 map_center = xi_v2_mul_f32(xi_v2_add(play->min_camera, play->max_camera), 0.5f);
         xi_v2 map_bounds = xi_v2_sub(play->max_camera, play->min_camera);
 
+        xi_f32 scale = XI_MAX(map_bounds.x, map_bounds.y);
+
+        xi_sprite_draw_xy_scaled(renderer, play->map, map_center, scale, 0);
         xi_quad_outline_draw_xy(renderer, xi_v4_create(1, 0, 0, 1), map_center, map_bounds, 0, 0.5f);
     }
 
