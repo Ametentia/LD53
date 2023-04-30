@@ -78,8 +78,6 @@ def generate():
     with open("../../code/nav_mesh_data.h", "w") as f:
         f.write("""#if !defined(NAV_MESH_DATA_H_)
 #define NAV_MESH_DATA_H_
-#include <xi/xi.h>
-#include "nav_mesh.h"
 
 nav_mesh_node NAV_MESH_NODES[] = {
 

@@ -1,10 +1,9 @@
 #include "ludum.h"
 
+#include "nav_mesh.c"
+
 #include "ludum_util.c"
 #include "ludum_mode_play.c"
-
-#include "nav_mesh.c"
-#include "nav_mesh_data.h"
 
 extern XI_EXPORT XI_GAME_INIT(xiContext *xi, xi_u32 type) {
     XI_ASSERT(xi->version.major == XI_VERSION_MAJOR);
@@ -77,9 +76,10 @@ extern XI_EXPORT XI_GAME_INIT(xiContext *xi, xi_u32 type) {
             ludum_mode_play_init(ld);
             xi->user = ld;
 
-            // @todo: init game here
             // TODO: @todo remove this debug path finding call
-			generateRoute(&NAV_MESH, 0, 5991);
+            //
+            XI_ASSERT(NAV_MESH.nodeCount > 0);
+            generateRoute(&NAV_MESH, 0, NAV_MESH.nodeCount - 1);
         }
         break;
         case XI_GAME_RELOADED: {

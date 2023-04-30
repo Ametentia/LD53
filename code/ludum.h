@@ -60,4 +60,8 @@ typedef struct ldContext {
     };
 } ldContext;
 
+// :engine_work this really should be defined along with XI_MIN, XI_MAX and XI_CLAMP
+//
+#define ABS(x) ((x) < 0 ? -(x) : (x))
+
 #endif  // LUDUM_H_
