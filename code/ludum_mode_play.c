@@ -60,6 +60,8 @@ typedef struct ldOrder {
 	v2 position;
 	f32 timer;
 	u32 assignedDriver;
+	b32 collected;
+	b32 free;
 
     ldStore *store;
 } ldOrder;
@@ -68,13 +70,14 @@ typedef struct ldCar {
 	v2 position;
 	nav_route route;
 	u32 currentRouteStopTarget;
+	u32 currentRouteIndex;
 	f32 speed;
 	f32 nodeProgress;
 	f32 onBreak;
     ldCarDir direction;
-    b8 goToStore;
 	ldOrder *assignedOrders[LD_MAX_CAR_ORDERS];
 	u32 orderCount;
+	u32 currentOrder;
 	u32 orderOffset;
 } ldCar;
 
@@ -467,17 +470,19 @@ static void ludum_car_init(ldModePlay *play, xiAssetManager *assets) {
             start = ludum_street_node_find_within_distance(play, store->index, store->position, 2);
         } while (start == XI_U32_MAX);
 
-		u32 end = ludum_find_street_node(play, start);
+		u32 end = store->index;
 
-		car->goToStore    = false;
 		car->route        = generateRoute(play->arena, &NAV_MESH, start, end);
-		car->speed        = 1.0f;
+		car->speed        = 0.2f;
 		car->orderCount   = 0;
+		car->currentOrder = -1;
 		car->orderOffset  = 0;
 		car->nodeProgress = 0;
 
         u32 stop_index = car->route.stop_count - 1;
 		car->currentRouteStopTarget = stop_index;
+
+		car->currentRouteIndex = start;
 
         nav_mesh_node *node = &play->nodes[car->route.stops[stop_index]];
 		car->position = xi_v2_create(node->x, node->y);
@@ -491,11 +496,15 @@ static void ludum_store_init(ldModePlay *play, xiAssetManager *assets) {
         nav_mesh_node *node = &play->nodes[location];
 		store->index = location;
 		store->orderCount = 0;
-		store->orderDelayMax = 20;
-		store->orderDelayMin = 18;
+		store->orderDelayMax = 1;
+		store->orderDelayMin = 1;
 		// Give the player 7 seconds before adding an order?
-		store->nextOrderIn = 7;
+		store->nextOrderIn = 1;
 		store->position = xi_v2_create(node->x, node->y);
+		for(u32 it = 0; it < LD_MAX_STORE_ORDERS; it++) {
+			store->orders[it].free = true;
+		}
+
 	}
 }
 
@@ -577,7 +586,7 @@ static void ludum_mode_play_init(ldContext *ld) {
         ludum_music_layers_configure(play, xi);
 
         play->map = xi_image_get_by_name(&xi->assets, "map_full");
-		play->carCount = 2;
+		play->carCount = 1;
 		play->storeMarker = xi_image_get_by_name(&xi->assets, "restaurantMarker");
 		play->orderMarker = xi_image_get_by_name(&xi->assets, "orderMarker");
 		play->orderMarkerAssigned = xi_image_get_by_name(&xi->assets, "orderMarkerAssigned");
@@ -608,8 +617,14 @@ static void ludum_store_update(ldModePlay *play, f32 delta) {
 
 		store->nextOrderIn -= delta;
 		if (store->nextOrderIn < 0 && store->orderCount < LD_MAX_STORE_ORDERS) {
-			ldOrder *order = &store->orders[store->orderCount];
 
+			ldOrder *order;
+			for(u32 it = 0; it < LD_MAX_STORE_ORDERS; it++) {
+ 				if(!store->orders[it].free)
+					continue;
+				order = &store->orders[it];
+				break;
+			}
 			// TODO: change this to how far the shop is away?
             //
             u32 index = ludum_street_node_find_within_distance(play, store->index, store->position, 2.0f);
@@ -619,11 +634,13 @@ static void ludum_store_update(ldModePlay *play, f32 delta) {
                 order->index          = index;
                 order->assignedDriver = -1;
                 order->store          = store;
+                order->free          = false;
 
                 v2 order_pos = xi_v2_create(node->x, node->y);
                 f32 distance = xi_v2_length(xi_v2_sub(store->position, order_pos));
 
                 order->timer    = 60;
+				order->collected = false;
                 order->position = order_pos;
 
                 store->orderCount++;
@@ -635,9 +652,10 @@ static void ludum_store_update(ldModePlay *play, f32 delta) {
 			store->nextOrderIn = xi_rng_range_f32(&play->rng, store->orderDelayMin, store->orderDelayMax);
 		}
 
-		for(int it = 0; it < store->orderCount; it++) {
+		for(int it = 0; it < LD_MAX_STORE_ORDERS; it++) {
 			ldOrder *order = &store->orders[it];
-			order->timer -= delta;
+			if(!order->free)
+				order->timer -= delta;
 		}
 	}
 }
@@ -681,19 +699,38 @@ static void ludum_car_update(ldModePlay *play, f32 delta) {
 		if (progress >= 1) {
 			car->nodeProgress = 0;
 			car->currentRouteStopTarget -= 1;
+			car->currentRouteIndex = endStop;
 
 			if(car->currentRouteStopTarget == 0) { // car->route.stop_count){
-				car->goToStore = !car->goToStore;
+				if(car->orderCount!=0) {
+					ldOrder *order = car->assignedOrders[car->currentOrder];
+					if(!order->collected) {
+						if(car->currentRouteIndex == order->store->index) {
+							order->collected = true;
+							car->route = generateRoute(play->arena, &NAV_MESH, endStop, order->index);
+						} else {
+							car->route = generateRoute(play->arena, &NAV_MESH, endStop, order->store->index);
+						}
+					} else {
+						car->orderCount--;
+						car->onBreak=1.5f;
+						order->free = true;
+						if(car->orderCount!=0) {
+							car->currentOrder = (car->currentOrder + 1) % LD_MAX_CAR_ORDERS;
+							order = car->assignedOrders[car->currentOrder];
+							car->route = generateRoute(play->arena, &NAV_MESH, endStop, order->store->index);
+						} else {
+							car->route = generateRoute(play->arena, &NAV_MESH, endStop, play->stores[xi_rng_choice_u32(&play->rng, play->storeCount)].index);
+						}
+					}
 
-				u32 end = ludum_find_street_node(play, endStop);
-				if (car->goToStore) {
-        			u32 storeIndex = xi_rng_choice_u32(&play->rng, play->storeCount);
-					end = play->stores[storeIndex].index;
+				} else {
+					// TODO remove this just wait at the shop
+					u32 end = ludum_find_street_node(play, endStop);
+					car->route = generateRoute(play->arena, &NAV_MESH, endStop, end); // endStop and end were flipped
+					car->onBreak = 1.5f;
 				}
-
-				car->route = generateRoute(play->arena, &NAV_MESH, endStop, end); // endStop and end were flipped
 				car->currentRouteStopTarget = car->route.stop_count - 1;
-				car->onBreak = 1.5f;
 			}
 
 			startStop = car->route.stops[car->currentRouteStopTarget];
@@ -767,7 +804,12 @@ static void ludum_mode_play_simulate(ldModePlay *play) {
 						);
 						v3 mouseUnprojectedV3 = xi_unproject_xy(&camera, mouse->position.clip);
 						v2 mouseUnprojected = xi_v2_create(mouseUnprojectedV3.x, mouseUnprojectedV3.y);
-						if(pointInRect(mouseUnprojected, orderHitbox)) {
+						if(pointInRect(mouseUnprojected, orderHitbox) && order->assignedDriver==-1) {
+							if(car->orderCount==0){
+								car->route = generateRoute(play->arena, &NAV_MESH, car->currentRouteIndex, order->store->index);
+								car->currentOrder = car->orderOffset;
+								car->currentRouteStopTarget = car->route.stop_count - 1;
+							}
 							car->assignedOrders[car->orderOffset] = order;
 							car->orderCount++;
 							car->orderOffset = (car->orderOffset + 1) % LD_MAX_CAR_ORDERS;
@@ -955,7 +997,6 @@ static void ludum_mode_play_render(ldModePlay *play, xiRenderer *renderer) {
     xi_sprite_draw_xy_scaled(renderer, play->map, map_center, scale, 0);
 	// draw cars
 	for(u32 i = 0; i < play->carCount; i++) {
-		/* CAR ROUTE FOR DEBUG
 		u32 lastStop = play->cars[i].route.stops[0];
 		for (u32 it = 1; it < play->cars[i].route.stop_count; it++) {
 			nav_mesh_node *node1 = &play->nodes[lastStop];
@@ -966,7 +1007,6 @@ static void ludum_mode_play_render(ldModePlay *play, xiRenderer *renderer) {
 			xi_line_draw_xy(renderer, b, node_d2, b, node_d1, 0.02);
 			lastStop = play->cars[i].route.stops[it];
 		}
-		*/
 		ldCar car = play->cars[i];
 		v4 b = xi_v4_create(0, 0, 1, 1);
 		u32 selectedOffset = 0;
@@ -979,8 +1019,10 @@ static void ludum_mode_play_render(ldModePlay *play, xiRenderer *renderer) {
 	for(u32 i = 0; i < play->storeCount; i++) {
         xi_sprite_draw_xy_scaled(renderer, play->storeMarker, play->stores[i].position, 0.1, 0);
 
-		for(u32 it = 0; it < play->stores[i].orderCount; it++) {
+		for(u32 it = 0; it < LD_MAX_STORE_ORDERS; it++) {
 			ldOrder *order = &play->stores[i].orders[it];
+			if(order->free)
+				continue;
 
 			xiImageHandle marker = play->orderMarkerAssigned;
             v4 mcolour = xi_v4_create(1, 1, 1, 1);
