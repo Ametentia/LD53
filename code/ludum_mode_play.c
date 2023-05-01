@@ -147,6 +147,9 @@ struct ldModePlay {
 	ldCar cars[25];
     xiImageHandle carImages[6];
 	xiImageHandle licenseHandle;
+	xiImageHandle reviewHandle;
+    xiImageHandle star;
+    xiImageHandle emptyStar;
 	xiImageHandle order_empty_handle;
 	xiImageHandle order_filled_handle;
 
@@ -494,10 +497,10 @@ static void ludum_store_init(ldModePlay *play, xiAssetManager *assets) {
         nav_mesh_node *node = &play->nodes[location];
 		store->index = location;
 		store->orderCount = 0;
-		store->orderDelayMax = 1;
-		store->orderDelayMin = 1;
+		store->orderDelayMax = 20;
+		store->orderDelayMin = 17;
 		// Give the player 7 seconds before adding an order?
-		store->nextOrderIn = 1;
+		store->nextOrderIn = 7;
 		store->position = xi_v2_create(node->x, node->y);
 		for(u32 it = 0; it < LD_MAX_STORE_ORDERS; it++) {
 			store->orders[it].free = true;
@@ -600,6 +603,9 @@ static void ludum_mode_play_init(ldContext *ld) {
         play->carImages[LD_CAR_DIR_SIDE_SELECTED] = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("car_side_selected"));
         play->carImages[LD_CAR_DIR_BACK_SELECTED] = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("car_back_selected"));
         play->licenseHandle = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("license_01"));
+        play->reviewHandle = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("review_bg"));
+        play->star = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("star_filled"));
+        play->emptyStar = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("star_empty"));
         play->order_empty_handle = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("empty_order"));
         play->order_filled_handle = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("order_filled"));
 
@@ -1104,6 +1110,10 @@ static void ludum_mode_play_render(ldModePlay *play, xiRenderer *renderer) {
 			}
     		xi_sprite_draw_xy(renderer, handle, xi_v2_create(0.223+0.025*i, -0.15), xi_v2_create(0.025, 0.025), 0);
 		}
+	}
+    xi_sprite_draw_xy(renderer, play->reviewHandle, xi_v2_create(-0.25, -0.15), xi_v2_create(0.15, 0.15), 0);
+	for(u32 i = 0; i < 5; i++) {
+    	xi_sprite_draw_xy(renderer, play->star, xi_v2_create(-0.302+i*0.025, -0.148), xi_v2_create(0.025, 0.025), 0);
 	}
 
     xi_logger_flush(&play->log);
