@@ -105,7 +105,7 @@ nav_route generateRoute(xiArena *alloc, nav_mesh *mesh, xi_u32 currentIndex, xi_
 		stopCount++;
 	}
 	currentIndex = targetIndex;
-	nav_route route = {};
+	nav_route route = { 0 };
 	route.stop_count = stopCount;
 	route.stops = xi_arena_push_array(alloc, xi_u32, stopCount);
 	u32 i = 0;

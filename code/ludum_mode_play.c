@@ -65,16 +65,19 @@ typedef union ldMusicTag {
     u32 value;
 } ldMusicTag;
 
+typedef struct ldCloudState ldCloudState;
+
 typedef struct ldCloudState {
     b32 enabled;
     u32 index;
 
     v2 p;
+    f32 layer;
     f32 speed;
     f32 scale;
     f32 darkness;
 
-    u32 next;
+    ldCloudState *next;
 } ldCloudState;
 
 struct ldModePlay {
@@ -116,9 +119,9 @@ struct ldModePlay {
 
         v2 max_dim;
 
-        u32 free;
         u32 count;
-        ldCloudState states[LD_MAX_CLOUDS];
+        ldCloudState *free;
+        ldCloudState *clouds;
     } clouds;
 
     xiSoundHandle static_long;
@@ -262,9 +265,8 @@ static void ludum_clouds_init(ldModePlay *play, xiAssetManager *assets) {
     play->clouds.min_y  = min_y;
     play->clouds.step_y = (max_y - min_y) / LD_MAX_CLOUDS;
 
-    for (u32 it = 0; it < LD_MAX_CLOUDS; ++it) {
-        play->clouds.states[it].next = it + 1;
-    }
+    play->clouds.free   = 0;
+    play->clouds.clouds = 0;
 
     play->clouds.timer = xi_rng_range_f32(&play->rng, LD_CLOUD_MIN_SPAWN_TIME, LD_CLOUD_MAX_SPAWN_TIME);
     play->clouds.free = 0;
@@ -274,13 +276,12 @@ static void ludum_cloud_add(ldModePlay *play) {
     xiRandomState *rng = &play->rng;
 
     if (play->clouds.count < LD_MAX_CLOUDS) {
+        ldCloudState *cloud = play->clouds.free;
 
-        u32 index = play->clouds.free;
+        if (cloud) { play->clouds.free = cloud->next; }
+        else { cloud = xi_arena_push_type(play->arena, ldCloudState); }
 
-        XI_ASSERT(index < LD_MAX_CLOUDS);
-
-        ldCloudState *cloud = &play->clouds.states[index];
-        play->clouds.free   = cloud->next;
+        u32 index = play->clouds.count;
 
         b32 left = (index & 1);
 
@@ -292,10 +293,54 @@ static void ludum_cloud_add(ldModePlay *play) {
 
         f32 dir = (left ? 1 : -1);
 
+        cloud->layer   = xi_rng_range_f32(rng, 0.83f, 2.95f);
         cloud->scale   = (xi_rng_choice_u32(rng, 2) ? -1 : 1) * xi_rng_range_f32(rng, 0.88f, 1.11f);
         cloud->speed   = dir * xi_rng_range_f32(rng, LD_CLOUD_MIN_MOVE_SPEED, LD_CLOUD_MAX_MOVE_SPEED);
         cloud->index   = 3; // xi_rng_choice_u32(&play->rng, LD_CLOUD_VARIATION_COUNT);
         cloud->enabled = true;
+
+        if (!play->clouds.clouds) {
+            // no clouds in list so just push onto head
+            //
+            play->clouds.clouds = cloud;
+            xi_log(&play->log, "clouds", "no cloud, setting to head");
+        }
+        else {
+            ldCloudState *prev = 0;
+            ldCloudState *cur  = play->clouds.clouds;
+            while (cur != 0) {
+                if (cur->layer > cloud->layer) {
+                    if (prev) {
+                        XI_ASSERT(prev->layer <= cloud->layer);
+                        XI_ASSERT(prev->next == cur);
+
+                        prev->next  = cloud;
+                    }
+                    else {
+                        play->clouds.clouds = cloud;
+                    }
+
+                    cloud->next = cur;
+
+                    // find the right layer index to insert to
+                    //
+                    break;
+                }
+
+                prev = cur;
+                cur  = cur->next;
+            }
+
+            // we walked the list and didn't find a layer greater than ours so append to the end
+            // (which should be in 'prev')
+            //
+            if (cur == 0) {
+                XI_ASSERT(prev != 0);
+
+                prev->next  = cloud;
+                cloud->next = 0;
+            }
+        }
 
         play->clouds.count += 1;
     }
@@ -442,7 +487,7 @@ static void ludum_car_update(ldModePlay *play, f32 delta) {
 				u32 end = xi_rng_choice_u32(&play->rng, play->node_count);
 				car->route = generateRoute(play->arena, &NAV_MESH, end, endStop);
 				car->currentRouteStopTarget = 1;
-                xi_log(&play->log, "routing", "new route between %d and %d", endStop, end);
+                // xi_log(&play->log, "routing", "new route between %d and %d", endStop, end);
 				car->onBreak = 1.5f;
 			}
 			startStop = car->route.stops[car->currentRouteStopTarget-1];
@@ -479,9 +524,11 @@ static void ludum_mode_play_simulate(ldModePlay *play) {
         play->max_zoom = LD_TOTAL_MAX_ZOOM;
     }
 
+    f32 dt = (f32) xi->time.delta.s;
+
     // handle camera movement
     //
-    play->zoom += (0.85f * mouse->delta.wheel.y);
+    play->zoom += (1.88f * mouse->delta.wheel.y * dt);
     play->zoom  = XI_CLAMP(play->zoom, LD_DEFAULT_MIN_ZOOM, play->max_zoom);
 
     if (mouse->left.down) {
@@ -500,8 +547,6 @@ static void ludum_mode_play_simulate(ldModePlay *play) {
     xiCameraTransform camera;
     xi_camera_transform_get_from_axes(&camera, aspect, x, y, z, p, 0);
 
-    f32 dt = (f32) xi->time.delta.s;
-
     play->clouds.timer -= dt;
     if (play->clouds.timer <= 0.0f) {
         ludum_cloud_add(play);
@@ -509,28 +554,35 @@ static void ludum_mode_play_simulate(ldModePlay *play) {
 
     // update clouds, removing any that have left the screen completely
     //
-    for (u32 it = 0; it < LD_MAX_CLOUDS; ++it) {
-        ldCloudState *cloud = &play->clouds.states[it];
-        if (cloud->enabled) {
-            cloud->p.x += (cloud->speed * dt);
+    ldCloudState *prev  = 0;
+    ldCloudState *cloud = play->clouds.clouds;
+    while (cloud != 0) {
+        cloud->p.x += (cloud->speed * dt);
 
-            // increase bounds slightly to be sure its completely offscreen so the player can't see
-            // any popping out behaviour
+        // 1 -> 2 -> 3
+        // p    c
+        // 1 -> 3
+
+        f32 min = 1.05f * (play->min_camera.x - play->clouds.max_dim.w);
+        f32 max = 1.05f * (play->max_camera.x + play->clouds.max_dim.w);
+
+        if ((cloud->p.x < min) || (cloud->p.x > max)) {
+            XI_ASSERT(play->clouds.count > 0);
+            play->clouds.count -= 1;
+
+            // remove from active list
             //
-            f32 min = 1.05f * (play->min_camera.x - play->clouds.max_dim.w);
-            f32 max = 1.05f * (play->max_camera.x + play->clouds.max_dim.w);
+            if (prev) { prev->next = cloud->next; }
+            else { play->clouds.clouds = cloud->next; }
 
-            cloud->enabled = (cloud->p.x >= min) && (cloud->p.x <= max);
-
-            // was enabled, no longer is
+            // put on freelist
             //
-            if (!cloud->enabled) {
-                cloud->next = play->clouds.free;
-                play->clouds.free = it;
-
-                play->clouds.count -= 1;
-            }
+            cloud->next = play->clouds.free;
+            play->clouds.free = cloud;
         }
+
+        prev  = cloud;
+        cloud = cloud->next;
     }
 
     // prevent the camera from leaving the map area
@@ -628,6 +680,8 @@ static void ludum_mode_play_render(ldModePlay *play, xiRenderer *renderer) {
 
     xi_camera_transform_set_from_axes(renderer, x, y, z, p, 0);
 
+
+
     xi_v2 map_center = xi_v2_mul_f32(xi_v2_add(play->min_camera, play->max_camera), 0.5f);
     xi_v2 map_bounds = xi_v2_sub(play->max_camera, play->min_camera);
 
@@ -666,39 +720,36 @@ static void ludum_mode_play_render(ldModePlay *play, xiRenderer *renderer) {
 
     // draw cloud shadows
     //
-    for (u32 it = 0; it < LD_MAX_CLOUDS; ++it) {
-        ldCloudState *cloud = &play->clouds.states[it];
-        if (cloud->enabled) {
-            xiImageHandle image = play->clouds.shadows[cloud->index];
+    ldCloudState *cloud = play->clouds.clouds;
+    while (cloud != 0) {
+        xiImageHandle image = play->clouds.shadows[cloud->index];
 
-            v2 scale = xi_v2_create(cloud->scale * cloud_scale, cloud_scale);
-            xi_sprite_draw_xy(renderer, image, cloud->p, scale, 0);
-        }
+        v2 scale = xi_v2_create(cloud->scale * cloud_scale, cloud_scale);
+        xi_sprite_draw_xy(renderer, image, cloud->p, scale, 0);
+
+        cloud = cloud->next;
     }
 
-    // push new layer for clouds above the rest of the world
-    //
-    renderer->layer_offset = 0.7f;
-    xi_renderer_layer_push(renderer);
+    cloud = play->clouds.clouds;
+    while (cloud != 0) {
+        // :note clouds are in layer sorted order so this is safe for transparency order.
+        //
+        // :engine_work it would be nice to have this auto-sorted or something but would require
+        // a bit of restructuring
+        //
+        renderer->layer = cloud->layer;
 
-    renderer->layer_offset = 0.5f; // :engine_work probably just want a set call for this
-
-    for (u32 it = 0; it < LD_MAX_CLOUDS; ++it) {
-        ldCloudState *cloud = &play->clouds.states[it];
-
-        xi_renderer_layer_push(renderer);
+        xiImageHandle image = play->clouds.images[cloud->index];
 
         f32 alpha = XI_CLAMP((play->zoom - renderer->layer) / LD_TOTAL_MAX_ZOOM, 0, 1);
         v4 a = xi_v4_create(1, 1, 1, alpha);
 
-        if (cloud->enabled) {
-            xiImageHandle image = play->clouds.images[cloud->index];
-
-            v2 scale = xi_v2_create(cloud->scale * cloud_scale, cloud_scale);
-            xi_coloured_sprite_draw_xy(renderer, image, a, cloud->p, scale, 0);
-        }
+        v2 scale = xi_v2_create(cloud->scale * cloud_scale, cloud_scale);
+        xi_coloured_sprite_draw_xy(renderer, image, a, cloud->p, scale, 0);
 
         renderer->layer_offset *= 0.85f;
+
+        cloud = cloud->next;
     }
 
     xi_logger_flush(&play->log);
