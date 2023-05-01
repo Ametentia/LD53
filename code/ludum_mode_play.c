@@ -1,15 +1,23 @@
 //#define LD_DEFAULT_MIN_ZOOM 12.0f
-#define LD_DEFAULT_MIN_ZOOM 1.0f
+#define LD_DEFAULT_MIN_ZOOM 0.70f
 #define LD_DEFAULT_MAX_ZOOM 4.5f // @incomplete: this will break when we limit zoom
 #define LD_TOTAL_MAX_ZOOM   4.0f
-#define LD_CLOUD_MOVE_SPEED 0.25
+#define LD_DEBUG_MAX_ZOOM   12.0f
 
 #define LD_AMBIENT_MUSIC_TAG 0x3322
 
 #define LD_SHORT_RADIO_TAG   0x4821
 #define LD_LONG_RADIO_TAG    0x4822
 
+#define LD_CLOUD_MIN_MOVE_SPEED 0.05
+#define LD_CLOUD_MAX_MOVE_SPEED 0.18
+
+#define LD_CLOUD_MIN_SPAWN_TIME 4.8f
+#define LD_CLOUD_MAX_SPAWN_TIME 10.2f
+#define LD_CLOUD_SCALE 2.8f
+
 #define LD_CLOUD_VARIATION_COUNT 6
+#define LD_MAX_CLOUDS 4
 
 #define LD_STATIC_LONG_TIMER_THRESHOLD 5.5f
 
@@ -57,13 +65,17 @@ typedef union ldMusicTag {
     u32 value;
 } ldMusicTag;
 
-typedef struct ldCloud {
+typedef struct ldCloudState {
+    b32 enabled;
+    u32 index;
+
     v2 p;
     f32 speed;
+    f32 scale;
+    f32 darkness;
 
-    xiImageHandle image;
-    xiImageHandle shadow;
-} ldCloud;
+    u32 next;
+} ldCloudState;
 
 struct ldModePlay {
     ldContext *ld;
@@ -93,8 +105,21 @@ struct ldModePlay {
 	ldCar cars[500];
 	u32 carCount;
 
-    u32 cloud_count;
-    ldCloud clouds[8];
+    struct {
+        xiImageHandle  images[LD_CLOUD_VARIATION_COUNT];
+        xiImageHandle shadows[LD_CLOUD_VARIATION_COUNT];
+
+        f32 timer;
+
+        f32 min_y;
+        f32 step_y; // y = min_y + (index * step_y)
+
+        v2 max_dim;
+
+        u32 free;
+        u32 count;
+        ldCloudState states[LD_MAX_CLOUDS];
+    } clouds;
 
     xiSoundHandle static_long;
     xiSoundHandle static_short;
@@ -194,30 +219,88 @@ static void ludum_music_layer_random_play(ldModePlay *play, xiAudioPlayer *audio
 }
 
 static void ludum_clouds_init(ldModePlay *play, xiAssetManager *assets) {
-    u32 count = xi_rng_choice_u32(&play->rng, XI_ARRAY_SIZE(play->clouds));
-    if (count == 0) { count = 1; }
-
     xiArena *temp = xi_temp_get();
-    for (u32 it = 0; it < count; ++it) {
-        ldCloud *cloud = &play->clouds[it];
 
-        u32 dir = xi_rng_choice_u32(&play->rng, 2);
+    play->clouds.max_dim.x = 0;
+    play->clouds.max_dim.y = 0;
 
-        cloud->p.x = dir ? play->min_camera.x : play->max_camera.x;
-        cloud->p.y = xi_rng_range_f32(&play->rng, 0.65 * play->min_camera.y, 0.65 * play->max_camera.y);
+    for (u32 it = 0; it < LD_CLOUD_VARIATION_COUNT; ++it) {
+        xi_string image_name  = xi_str_format(temp, "cloud_%d", it);
+        xi_string shadow_name = xi_str_format(temp, "cloud_%d_shadow", it);
 
-        cloud->speed = (dir ? 1 : -1) * (0.5f * xi_rng_unilateral_f32(&play->rng));
+        play->clouds.images[it]  = xi_image_get_by_name_str(assets, image_name);
+        play->clouds.shadows[it] = xi_image_get_by_name_str(assets, shadow_name);
 
-        u32 index = 3; //xi_rng_choice_u32(&play->rng, LD_CLOUD_VARIATION_COUNT);
+        XI_ASSERT(play->clouds.images[it].value  != 0);
+        XI_ASSERT(play->clouds.shadows[it].value != 0);
 
-        xi_string image_name  = xi_str_format(temp, "cloud_%d", index);
-        xi_string shadow_name = xi_str_format(temp, "cloud_%d_shadow", index);
+        xiaImageInfo *info = xi_image_info_get(assets, play->clouds.images[it]);
+        XI_ASSERT(info != 0);
 
-        cloud->image  = xi_image_get_by_name_str(assets, image_name);
-        cloud->shadow = xi_image_get_by_name_str(assets, shadow_name);
+        // :engine_work we probably want a call to get the size of a sprite at a specific scale or something
+        //
+        f32 width, height;
+
+        if (info->width > info->height) {
+            width  = LD_CLOUD_SCALE;
+            height = LD_CLOUD_SCALE * (info->height / (f32) info->width);
+        }
+        else {
+            width  = LD_CLOUD_SCALE * (info->width / (f32) info->height);
+            height = LD_CLOUD_SCALE;
+        }
+
+        if (width  > play->clouds.max_dim.w) { play->clouds.max_dim.w = width;  }
+        if (height > play->clouds.max_dim.h) { play->clouds.max_dim.h = height; }
     }
 
-    play->cloud_count = count;
+    play->clouds.max_dim = xi_v2_mul_f32(play->clouds.max_dim, 0.5f);
+
+    f32 min_y = 0.55f * play->min_camera.y;
+    f32 max_y = 0.68f * play->max_camera.y;
+
+    play->clouds.min_y  = min_y;
+    play->clouds.step_y = (max_y - min_y) / LD_MAX_CLOUDS;
+
+    for (u32 it = 0; it < LD_MAX_CLOUDS; ++it) {
+        play->clouds.states[it].next = it + 1;
+    }
+
+    play->clouds.timer = xi_rng_range_f32(&play->rng, LD_CLOUD_MIN_SPAWN_TIME, LD_CLOUD_MAX_SPAWN_TIME);
+    play->clouds.free = 0;
+}
+
+static void ludum_cloud_add(ldModePlay *play) {
+    xiRandomState *rng = &play->rng;
+
+    if (play->clouds.count < LD_MAX_CLOUDS) {
+
+        u32 index = play->clouds.free;
+
+        XI_ASSERT(index < LD_MAX_CLOUDS);
+
+        ldCloudState *cloud = &play->clouds.states[index];
+        play->clouds.free   = cloud->next;
+
+        b32 left = (index & 1);
+
+        f32 h = play->clouds.max_dim.h;
+
+        cloud->p.y = play->clouds.min_y + (index * play->clouds.step_y); // + xi_rng_range_f32(rng, -h, h);
+        cloud->p.x = left ? (play->min_camera.x - play->clouds.max_dim.w) :
+                            (play->max_camera.x + play->clouds.max_dim.w);
+
+        f32 dir = (left ? 1 : -1);
+
+        cloud->scale   = (xi_rng_choice_u32(rng, 2) ? -1 : 1) * xi_rng_range_f32(rng, 0.88f, 1.11f);
+        cloud->speed   = dir * xi_rng_range_f32(rng, LD_CLOUD_MIN_MOVE_SPEED, LD_CLOUD_MAX_MOVE_SPEED);
+        cloud->index   = 3; // xi_rng_choice_u32(&play->rng, LD_CLOUD_VARIATION_COUNT);
+        cloud->enabled = true;
+
+        play->clouds.count += 1;
+    }
+
+    play->clouds.timer = xi_rng_range_f32(rng, LD_CLOUD_MIN_SPAWN_TIME, LD_CLOUD_MAX_SPAWN_TIME);
 }
 
 static void ludum_car_init(ldModePlay *play, xiAssetManager *assets) {
@@ -264,7 +347,7 @@ static void ludum_mode_play_init(ldContext *ld) {
         v3 y = xi_v3_create(0, 1, 0);
         v3 z = xi_v3_create(0, 0, 1);
 
-        v3 p = xi_v3_create(0, 0, LD_TOTAL_MAX_ZOOM);
+        v3 p = xi_v3_create(0, 0, LD_TOTAL_MAX_ZOOM * 1.25f);
 
         play->rng.state = xi->time.ticks;
 
@@ -275,6 +358,8 @@ static void ludum_mode_play_init(ldContext *ld) {
 
         play->min_camera = bounds.min.xy;
         play->max_camera = bounds.max.xy;
+
+        ludum_clouds_init(play, &xi->assets);
 
         // setup nav mesh nodes for test drawing
         //
@@ -298,8 +383,6 @@ static void ludum_mode_play_init(ldContext *ld) {
                 dst->connections[x] = src->connections[x];
             }
         }
-
-        ludum_clouds_init(play, &xi->assets);
 
 #if 0
         play->cloud_p.x = play->min_camera.x;
@@ -389,6 +472,13 @@ static void ludum_mode_play_simulate(ldModePlay *play) {
         ludum_music_layer_random_play(play, audio);
     }
 
+    if (kb->alt) {
+        play->max_zoom = LD_DEBUG_MAX_ZOOM;
+    }
+    else {
+        play->max_zoom = LD_TOTAL_MAX_ZOOM;
+    }
+
     // handle camera movement
     //
     play->zoom += (0.85f * mouse->delta.wheel.y);
@@ -412,20 +502,48 @@ static void ludum_mode_play_simulate(ldModePlay *play) {
 
     f32 dt = (f32) xi->time.delta.s;
 
-    for (u32 it = 0; it < play->cloud_count; ++it) {
-        ldCloud *cloud = &play->clouds[it];
-        cloud->p.x += (cloud->speed * dt);
+    play->clouds.timer -= dt;
+    if (play->clouds.timer <= 0.0f) {
+        ludum_cloud_add(play);
+    }
+
+    // update clouds, removing any that have left the screen completely
+    //
+    for (u32 it = 0; it < LD_MAX_CLOUDS; ++it) {
+        ldCloudState *cloud = &play->clouds.states[it];
+        if (cloud->enabled) {
+            cloud->p.x += (cloud->speed * dt);
+
+            // increase bounds slightly to be sure its completely offscreen so the player can't see
+            // any popping out behaviour
+            //
+            f32 min = 1.05f * (play->min_camera.x - play->clouds.max_dim.w);
+            f32 max = 1.05f * (play->max_camera.x + play->clouds.max_dim.w);
+
+            cloud->enabled = (cloud->p.x >= min) && (cloud->p.x <= max);
+
+            // was enabled, no longer is
+            //
+            if (!cloud->enabled) {
+                cloud->next = play->clouds.free;
+                play->clouds.free = it;
+
+                play->clouds.count -= 1;
+            }
+        }
     }
 
     // prevent the camera from leaving the map area
     //
-    rect3 bounds = xi_camera_bounds_get(&camera);
+    if (!kb->alt) {
+        rect3 bounds = xi_camera_bounds_get(&camera);
 
-    if (bounds.min.x < play->min_camera.x) { play->camera_p.x += (play->min_camera.x - bounds.min.x); }
-    if (bounds.max.x > play->max_camera.x) { play->camera_p.x += (play->max_camera.x - bounds.max.x); }
+        if (bounds.min.x < play->min_camera.x) { play->camera_p.x += (play->min_camera.x - bounds.min.x); }
+        if (bounds.max.x > play->max_camera.x) { play->camera_p.x += (play->max_camera.x - bounds.max.x); }
 
-    if (bounds.min.y < play->min_camera.y) { play->camera_p.y += (play->min_camera.y - bounds.min.y); }
-    if (bounds.max.y > play->max_camera.y) { play->camera_p.y += (play->max_camera.y - bounds.max.y); }
+        if (bounds.min.y < play->min_camera.y) { play->camera_p.y += (play->min_camera.y - bounds.min.y); }
+        if (bounds.max.y > play->max_camera.y) { play->camera_p.y += (play->max_camera.y - bounds.max.y); }
+    }
 
     play->angle += dt;
 
@@ -497,6 +615,9 @@ static void ludum_mode_play_simulate(ldModePlay *play) {
 }
 
 static void ludum_mode_play_render(ldModePlay *play, xiRenderer *renderer) {
+    ldContext *ld = play->ld;
+    xiContext *xi = ld->xi;
+
     // basic camera transform
     //
     v3 x = xi_v3_create(1, 0, 0);
@@ -530,42 +651,54 @@ static void ludum_mode_play_render(ldModePlay *play, xiRenderer *renderer) {
 		ldCar car = play->cars[i];
         xi_sprite_draw_xy_scaled(renderer, car.images[car.direction], car.position, 0.1, 0);
 	}
+    xi_quad_outline_draw_xy(renderer, xi_v4_create(1, 0, 0, 1), map_center, map_bounds, 0, 0.02f);
+
+    for (u32 it = 0; it < play->node_count; ++it) {
+        nav_mesh_node *node = &play->nodes[it];
+
+        v4 r = xi_v4_create(1, 0, 0, 1);
+
+        v2 node_p = xi_v2_create(node->x, node->y);
+        xi_quad_draw_xy(renderer, r, node_p, xi_v2_create(0.02, 0.02), 0);
+    }
 
     f32 cloud_scale = 2.8f;
 
     // draw cloud shadows
     //
-    for (u32 it = 0; it < play->cloud_count; ++it) {
-        ldCloud *cloud = &play->clouds[it];
-        xi_sprite_draw_xy_scaled(renderer, cloud->shadow, cloud->p, cloud_scale, 0);
-    }
+    for (u32 it = 0; it < LD_MAX_CLOUDS; ++it) {
+        ldCloudState *cloud = &play->clouds.states[it];
+        if (cloud->enabled) {
+            xiImageHandle image = play->clouds.shadows[cloud->index];
 
-    // temp test pyramid
-    //
-    renderer->layer_offset = 0.03f;
-    f32 s = 0.15;
-    for (u32 it = 0; it < 5; ++it) {
-        xi_renderer_layer_push(renderer);
-        xi_quad_draw_xy(renderer, xi_v4_create(s, s, 0, 1), play->p, xi_v2_create(s, s), 0);
-
-        s *= 0.5f;
+            v2 scale = xi_v2_create(cloud->scale * cloud_scale, cloud_scale);
+            xi_sprite_draw_xy(renderer, image, cloud->p, scale, 0);
+        }
     }
 
     // push new layer for clouds above the rest of the world
     //
-    renderer->layer_offset = 1.0f; // @todo: set at init
+    renderer->layer_offset = 0.7f;
     xi_renderer_layer_push(renderer);
 
-    map_bounds.x *= 0.713f;
-    map_bounds.y *= 0.65f;
-    xi_quad_outline_draw_xy(renderer, xi_v4_create(1, 0, 0, 1), map_center, map_bounds, 0, 0.02f);
+    renderer->layer_offset = 0.5f; // :engine_work probably just want a set call for this
 
-    f32 alpha = XI_MAX((play->zoom - renderer->layer) / LD_TOTAL_MAX_ZOOM, 0);
-    v4 a = xi_v4_create(1, 1, 1, alpha);
+    for (u32 it = 0; it < LD_MAX_CLOUDS; ++it) {
+        ldCloudState *cloud = &play->clouds.states[it];
 
-    for (u32 it = 0; it < play->cloud_count; ++it) {
-        ldCloud *cloud = &play->clouds[it];
-        xi_coloured_sprite_draw_xy_scaled(renderer, cloud->image, a, cloud->p, cloud_scale, 0);
+        xi_renderer_layer_push(renderer);
+
+        f32 alpha = XI_CLAMP((play->zoom - renderer->layer) / LD_TOTAL_MAX_ZOOM, 0, 1);
+        v4 a = xi_v4_create(1, 1, 1, alpha);
+
+        if (cloud->enabled) {
+            xiImageHandle image = play->clouds.images[cloud->index];
+
+            v2 scale = xi_v2_create(cloud->scale * cloud_scale, cloud_scale);
+            xi_coloured_sprite_draw_xy(renderer, image, a, cloud->p, scale, 0);
+        }
+
+        renderer->layer_offset *= 0.85f;
     }
 
     xi_logger_flush(&play->log);
