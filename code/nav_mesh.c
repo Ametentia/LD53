@@ -17,14 +17,18 @@ typedef struct nav_mesh {
 //
 #include "nav_mesh_data.h"
 
+#if XI_OS_LINUX
 double diff_timespec(const struct timespec *time1, const struct timespec *time0) {
   return (time1->tv_sec - time0->tv_sec)
       + (time1->tv_nsec - time0->tv_nsec) / 1000000000.0;
 }
+#endif
 
 int *generateRoute(nav_mesh *mesh, xi_u32 currentIndex, xi_u32 targetIndex) {
+#if XI_OS_LINUX
 	struct timespec start, finish, delta;
 	clock_gettime(CLOCK_MONOTONIC, &start);
+#endif
 
     XI_ASSERT(targetIndex < mesh->nodeCount);
 
@@ -106,8 +110,10 @@ int *generateRoute(nav_mesh *mesh, xi_u32 currentIndex, xi_u32 targetIndex) {
 	while(currentIndex!=startNode)
 		currentIndex = backTrackNode[currentIndex];
 
+#if XI_OS_LINUX
 	clock_gettime(CLOCK_MONOTONIC, &finish);
    	double timetaken = diff_timespec(&finish, &start);
+#endif
 
 	return 0;
 }

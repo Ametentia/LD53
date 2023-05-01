@@ -1,11 +1,15 @@
-#define LD_DEFAULT_MIN_ZOOM 12.0f
+//#define LD_DEFAULT_MIN_ZOOM 12.0f
+#define LD_DEFAULT_MIN_ZOOM 1.0f
 #define LD_DEFAULT_MAX_ZOOM 4.5f // @incomplete: this will break when we limit zoom
-#define LD_TOTAL_MAX_ZOOM   28.5f
+#define LD_TOTAL_MAX_ZOOM   4.0f
+#define LD_CLOUD_MOVE_SPEED 0.25
 
 #define LD_AMBIENT_MUSIC_TAG 0x3322
 
 #define LD_SHORT_RADIO_TAG   0x4821
 #define LD_LONG_RADIO_TAG    0x4822
+
+#define LD_CLOUD_VARIATION_COUNT 6
 
 #define LD_STATIC_LONG_TIMER_THRESHOLD 5.5f
 
@@ -26,13 +30,21 @@ static const char *ld_music_type_prefixes[LD_MUSIC_TYPE_COUNT] = { "chill", "cou
 
 typedef union ldMusicTag {
     struct {
-        u16 type; // ldMusicLayer
+        u16 type; // ldMusicType
         b8  radio;
         u8  index;
     };
 
     u32 value;
 } ldMusicTag;
+
+typedef struct ldCloud {
+    v2 p;
+    f32 speed;
+
+    xiImageHandle image;
+    xiImageHandle shadow;
+} ldCloud;
 
 struct ldModePlay {
     ldContext *ld;
@@ -56,6 +68,12 @@ struct ldModePlay {
 
         ldMusicTag current;
     } music;
+
+    u32 node_count;
+    nav_mesh_node *nodes;
+
+    u32 cloud_count;
+    ldCloud clouds[8];
 
     xiSoundHandle static_long;
     xiSoundHandle static_short;
@@ -141,8 +159,6 @@ static void ludum_music_layer_random_play(ldModePlay *play, xiAudioPlayer *audio
         tag.radio = true;
         tag.index = xi_rng_choice_u32(&play->rng, ld_music_type_counts[tag.type]);
 
-        xi_log(&play->log, "music", "tag { %d, true, %d }", tag.type, tag.index);
-
         play->music.current = tag;
         play->music.waiting = true;
 
@@ -154,6 +170,33 @@ static void ludum_music_layer_random_play(ldModePlay *play, xiAudioPlayer *audio
             xi_sound_effect_play(audio, play->static_short, LD_SHORT_RADIO_TAG, 0.9f);
         }
     }
+}
+
+static void ludum_clouds_init(ldModePlay *play, xiAssetManager *assets) {
+    u32 count = xi_rng_choice_u32(&play->rng, XI_ARRAY_SIZE(play->clouds));
+    if (count == 0) { count = 1; }
+
+    xiArena *temp = xi_temp_get();
+    for (u32 it = 0; it < count; ++it) {
+        ldCloud *cloud = &play->clouds[it];
+
+        u32 dir = xi_rng_choice_u32(&play->rng, 2);
+
+        cloud->p.x = dir ? play->min_camera.x : play->max_camera.x;
+        cloud->p.y = xi_rng_range_f32(&play->rng, 0.65 * play->min_camera.y, 0.65 * play->max_camera.y);
+
+        cloud->speed = (dir ? 1 : -1) * (0.5f * xi_rng_unilateral_f32(&play->rng));
+
+        u32 index = 3; //xi_rng_choice_u32(&play->rng, LD_CLOUD_VARIATION_COUNT);
+
+        xi_string image_name  = xi_str_format(temp, "cloud_%d", index);
+        xi_string shadow_name = xi_str_format(temp, "cloud_%d_shadow", index);
+
+        cloud->image  = xi_image_get_by_name_str(assets, image_name);
+        cloud->shadow = xi_image_get_by_name_str(assets, shadow_name);
+    }
+
+    play->cloud_count = count;
 }
 
 static void ludum_mode_play_init(ldContext *ld) {
@@ -176,8 +219,8 @@ static void ludum_mode_play_init(ldContext *ld) {
         play->max_zoom = LD_TOTAL_MAX_ZOOM;
         play->camera_p = xi_v2_create(0, 0);
 
-        v2u window_dim = xi->renderer.setup.window_dim;
-        f32 aspect = 1280.0f / 720.0f; // :engine_work incomplete, renderer window_dim isn't available in init
+        v2u window_dim   = xi->renderer.setup.window_dim;
+        f32 aspect_ratio = (f32) window_dim.w / (f32) window_dim.h;
 
         v3 x = xi_v3_create(1, 0, 0);
         v3 y = xi_v3_create(0, 1, 0);
@@ -185,20 +228,55 @@ static void ludum_mode_play_init(ldContext *ld) {
 
         v3 p = xi_v3_create(0, 0, LD_TOTAL_MAX_ZOOM);
 
+        play->rng.state = xi->time.ticks;
+
         xiCameraTransform full_map;
-        xi_camera_transform_get_from_axes(&full_map, aspect, x, y, z, p, 0);
+        xi_camera_transform_get_from_axes(&full_map, aspect_ratio, x, y, z, p, 0);
 
         rect3 bounds = xi_camera_bounds_get(&full_map);
 
         play->min_camera = bounds.min.xy;
         play->max_camera = bounds.max.xy;
 
+        // setup nav mesh nodes for test drawing
+        //
+        nav_mesh *mesh = &NAV_MESH;
+
+        play->node_count = mesh->nodeCount;
+        play->nodes      = xi_arena_push_array(play->arena, nav_mesh_node, play->node_count);
+
+        for (u32 it = 0; it < play->node_count; ++it) {
+            nav_mesh_node *src = &mesh->nodes[it];
+            nav_mesh_node *dst = &play->nodes[it];
+
+            v2 p  = xi_v2_create(-1 + (src->x / 1920.0f), 1 - (src->y / 1080.0f));
+            v2 up = xi_unproject_xy(&full_map, p).xy;
+
+            dst->x = up.x;
+            dst->y = up.y;
+
+            dst->connectionCount = src->connectionCount;
+            for (u32 x = 0; x < dst->connectionCount; ++x) {
+                dst->connections[x] = src->connections[x];
+            }
+        }
+
+        ludum_clouds_init(play, &xi->assets);
+
+#if 0
+        play->cloud_p.x = play->min_camera.x;
+        play->cloud_p.y = 0.5f * (play->max_camera.y + play->min_camera.y);
+
+        play->cloud = xi_image_get_by_name(&xi->assets, "cloud_3");
+        play->cloud_shadow = xi_image_get_by_name(&xi->assets, "cloud_3_shadow");
+#endif
+
         play->static_long  = xi_sound_get_by_name(&xi->assets, "static_long");
         play->static_short = xi_sound_get_by_name(&xi->assets, "static_short");
 
         ludum_music_layers_configure(play, xi);
 
-        play->map = xi_image_get_by_name(&xi->assets, "map_details");
+        play->map = xi_image_get_by_name(&xi->assets, "map_full");
 
         ld->mode = LD_MODE_PLAY;
     }
@@ -215,10 +293,6 @@ static void ludum_mode_play_simulate(ldModePlay *play) {
 
     xiAudioPlayer *audio = &xi->audio_player;
 
-    // :engine_work time ticks not available in init
-    //
-    if (play->rng.state == 0) { play->rng.state = xi->time.ticks; }
-
     play->music.timer += xi->time.delta.s;
 
     if (kb->keys['m'].pressed) {
@@ -227,7 +301,7 @@ static void ludum_mode_play_simulate(ldModePlay *play) {
 
     // handle camera movement
     //
-    play->zoom += mouse->delta.wheel.y;
+    play->zoom += (0.85f * mouse->delta.wheel.y);
     play->zoom  = XI_CLAMP(play->zoom, LD_DEFAULT_MIN_ZOOM, play->max_zoom);
 
     if (mouse->left.down) {
@@ -246,6 +320,13 @@ static void ludum_mode_play_simulate(ldModePlay *play) {
     xiCameraTransform camera;
     xi_camera_transform_get_from_axes(&camera, aspect, x, y, z, p, 0);
 
+    f32 dt = (f32) xi->time.delta.s;
+
+    for (u32 it = 0; it < play->cloud_count; ++it) {
+        ldCloud *cloud = &play->clouds[it];
+        cloud->p.x += (cloud->speed * dt);
+    }
+
     // prevent the camera from leaving the map area
     //
     rect3 bounds = xi_camera_bounds_get(&camera);
@@ -256,7 +337,7 @@ static void ludum_mode_play_simulate(ldModePlay *play) {
     if (bounds.min.y < play->min_camera.y) { play->camera_p.y += (play->min_camera.y - bounds.min.y); }
     if (bounds.max.y > play->max_camera.y) { play->camera_p.y += (play->max_camera.y - bounds.max.y); }
 
-    play->angle += xi->time.delta.s;
+    play->angle += dt;
 
     // handle audio events to play music correctly
     //
@@ -334,17 +415,57 @@ static void ludum_mode_play_render(ldModePlay *play, xiRenderer *renderer) {
 
     xi_camera_transform_set_from_axes(renderer, x, y, z, p, 0);
 
-    {
-        xi_v2 map_center = xi_v2_mul_f32(xi_v2_add(play->min_camera, play->max_camera), 0.5f);
-        xi_v2 map_bounds = xi_v2_sub(play->max_camera, play->min_camera);
+    xi_v2 map_center = xi_v2_mul_f32(xi_v2_add(play->min_camera, play->max_camera), 0.5f);
+    xi_v2 map_bounds = xi_v2_sub(play->max_camera, play->min_camera);
 
-        xi_f32 scale = XI_MAX(map_bounds.x, map_bounds.y);
+    xi_f32 scale = XI_MAX(map_bounds.x, map_bounds.y);
+    xi_sprite_draw_xy_scaled(renderer, play->map, map_center, scale, 0);
 
-        xi_sprite_draw_xy_scaled(renderer, play->map, map_center, scale, 0);
-        xi_quad_outline_draw_xy(renderer, xi_v4_create(1, 0, 0, 1), map_center, map_bounds, 0, 0.5f);
+    for (u32 it = 0; it < play->node_count; ++it) {
+        nav_mesh_node *node = &play->nodes[it];
+
+        v4 r = xi_v4_create(1, 0, 0, 1);
+
+        v2 node_p = xi_v2_create(node->x, node->y);
+        xi_quad_draw_xy(renderer, r, node_p, xi_v2_create(0.02, 0.02), 0);
     }
 
-    xi_quad_draw_xy(renderer, xi_v4_create(1, 1, 0, 1), play->p, xi_v2_create(1, 1), play->angle);
+    f32 cloud_scale = 2.8f;
+
+    // draw cloud shadows
+    //
+    for (u32 it = 0; it < play->cloud_count; ++it) {
+        ldCloud *cloud = &play->clouds[it];
+        xi_sprite_draw_xy_scaled(renderer, cloud->shadow, cloud->p, cloud_scale, 0);
+    }
+
+    // temp test pyramid
+    //
+    renderer->layer_offset = 0.03f;
+    f32 s = 0.15;
+    for (u32 it = 0; it < 5; ++it) {
+        xi_renderer_layer_push(renderer);
+        xi_quad_draw_xy(renderer, xi_v4_create(s, s, 0, 1), play->p, xi_v2_create(s, s), 0);
+
+        s *= 0.5f;
+    }
+
+    // push new layer for clouds above the rest of the world
+    //
+    renderer->layer_offset = 1.0f; // @todo: set at init
+    xi_renderer_layer_push(renderer);
+
+    map_bounds.x *= 0.713f;
+    map_bounds.y *= 0.65f;
+    xi_quad_outline_draw_xy(renderer, xi_v4_create(1, 0, 0, 1), map_center, map_bounds, 0, 0.02f);
+
+    f32 alpha = XI_MAX((play->zoom - renderer->layer) / LD_TOTAL_MAX_ZOOM, 0);
+    v4 a = xi_v4_create(1, 1, 1, alpha);
+
+    for (u32 it = 0; it < play->cloud_count; ++it) {
+        ldCloud *cloud = &play->clouds[it];
+        xi_coloured_sprite_draw_xy_scaled(renderer, cloud->image, a, cloud->p, cloud_scale, 0);
+    }
 
     xi_logger_flush(&play->log);
 }
