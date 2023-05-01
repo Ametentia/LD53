@@ -198,6 +198,8 @@ static void ludum_music_layers_configure(ldModePlay *play, xiContext *xi) {
 
     xiArena *temp = xi_temp_get();
 
+    xi_music_layers_clear(audio);
+
     // the base layer is always the ambient sound
     //
     xiSoundHandle ambient = xi_sound_get_by_name(assets, "ambient_01");
@@ -358,7 +360,7 @@ static void ludum_cloud_add(ldModePlay *play) {
 
         f32 dir = (left ? 1 : -1);
 
-        cloud->layer   = xi_rng_range_f32(rng, 1.2f, 2.95f);
+        cloud->layer   = xi_rng_range_f32(rng, 1.8f, 2.95f);
         cloud->scale   = (xi_rng_choice_u32(rng, 2) ? -1 : 1) * xi_rng_range_f32(rng, 0.88f, 1.11f);
         cloud->speed   = dir * xi_rng_range_f32(rng, LD_CLOUD_MIN_MOVE_SPEED, LD_CLOUD_MAX_MOVE_SPEED);
         cloud->index   = 3; // xi_rng_choice_u32(&play->rng, LD_CLOUD_VARIATION_COUNT);
@@ -981,28 +983,58 @@ static void ludum_mode_play_render(ldModePlay *play, xiRenderer *renderer) {
 			ldOrder *order = &play->stores[i].orders[it];
 
 			xiImageHandle marker = play->orderMarkerAssigned;
+            v4 mcolour = xi_v4_create(1, 1, 1, 1);
 
             v2 pos = order->position;
             pos.x = XI_CLAMP(order->position.x, bounds.min.x, bounds.max.x);
             pos.y = XI_CLAMP(order->position.y, bounds.min.y, bounds.max.y);
 
-			if(play->stores[i].orders[it].assignedDriver == -1) {
-				marker = play->orderMarker;
-                v4 colour = xi_v4_create(0, 1, 0, 1);
+            rect2 b;
+            b.min = bounds.min.xy;
+            b.max = bounds.max.xy;
+            v4 colour = xi_v4_create(0, 1, 0, 1);
 
-                f32 time_remaining = order->timer / 60.0f; // @hardcode: from above when orders are spawned
-                if (time_remaining < 0.15f) {
-                    colour = xi_v4_create(1.0f, 0.0f, 0.0f, 1.0f);
+            f32 time_remaining = order->timer / 60.0f; // @hardcode: from above when orders are spawned
+            if (time_remaining < 0.15f) {
+                colour.r = 1.0f;
+                colour.g = 0.0f;
+            }
+            else if (time_remaining < 0.5f) {
+                colour.r = 1.0f;
+                colour.g = 0.65f;
+            }
+
+            f32 angle = 0;
+            if (pointInRect(order->position, b)) {
+                if(play->stores[i].orders[it].assignedDriver == -1) {
+                    marker = play->orderMarker;
+
+                    f32 scale = 0.1f + xi_sin(order->timer);
+                    xi_coloured_sprite_draw_xy_scaled(renderer, play->orderBubble, colour, pos, scale, 0);
                 }
-                else if (time_remaining < 0.5f) {
-                    colour = xi_v4_create(1.0f, 0.65f, 0.0f, 1.0f);
+
+                v4 cyan = xi_v4_create(0, 1, 1, 1);
+                xi_line_draw_xy(renderer, cyan, pos, cyan, play->stores[i].position, 0.01f);
+            }
+            else {
+                marker = play->orderMarker;
+                f32 pi = 3.1415f;
+
+                mcolour = colour;
+
+                if (order->position.x < b.min.x) { angle = 0.5f * pi; }
+                else if (order->position.x > b.max.x) { angle = -0.5f * pi; }
+
+                if (order->position.y < b.min.y) {
+                    if (angle != 0) { angle = pi - (0.5f * angle); }
+                    else { angle = pi; }
                 }
+                else if (order->position.y > b.max.y) {
+                    if (angle != 0) { angle = 0.5f * angle; }
+                }
+            }
 
-
-        		xi_coloured_sprite_draw_xy_scaled(renderer, play->orderBubble, colour, pos, 0.1+xi_sin(order->timer), 0);
-			}
-
-        	xi_sprite_draw_xy_scaled(renderer, marker, pos, 0.1, 0);
+        	xi_coloured_sprite_draw_xy_scaled(renderer, marker, mcolour, pos, 0.1, angle);
 		}
 
 	}
@@ -1039,8 +1071,6 @@ static void ludum_mode_play_render(ldModePlay *play, xiRenderer *renderer) {
 
         v2 scale = xi_v2_create(cloud->scale * cloud_scale, cloud_scale);
         xi_coloured_sprite_draw_xy(renderer, image, a, cloud->p, scale, 0);
-
-        renderer->layer_offset *= 0.85f;
 
         cloud = cloud->next;
     }

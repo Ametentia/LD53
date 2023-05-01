@@ -41,10 +41,11 @@ typedef xi_rect3 rect3;
 // mode typedefs so we don't have to have unneeded headers
 //
 typedef struct ldModePlay ldModePlay;
+typedef struct ldModeMenu ldModeMenu;
 
 enum ldModeType {
     LD_MODE_NONE = 0,
-    LD_MODE_MENU, // @incomplete: no menu yet
+    LD_MODE_MENU,
     LD_MODE_PLAY
 };
 
@@ -57,6 +58,7 @@ typedef struct ldContext {
     u32 mode;
     union {
         ldModePlay *play;
+        ldModeMenu *menu;
     };
 } ldContext;
 
