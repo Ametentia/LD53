@@ -23,10 +23,16 @@
 
 #define LD_NUM_RADIO_STATIC 7
 
+#define LD_MAX_STORE_ORDERS 12
+#define LD_CAR_HIT_BOX_SIZE 0.1
+
 typedef enum ldCarDir {
     LD_CAR_DIR_FRONT = 0,
     LD_CAR_DIR_SIDE,
     LD_CAR_DIR_BACK,
+    LD_CAR_DIR_FRONT_SELECTED,
+    LD_CAR_DIR_SIDE_SELECTED,
+    LD_CAR_DIR_BACK_SELECTED,
 
     LD_CAR_DIR_COUNT
 } ldCarDir;
@@ -44,6 +50,13 @@ enum ldMusicType {
 static const u32   ld_music_type_counts[LD_MUSIC_TYPE_COUNT]   = { 1,       1,         1,      2,        1      };
 static const char *ld_music_type_prefixes[LD_MUSIC_TYPE_COUNT] = { "chill", "country", "funk", "hiphop", "rock" };
 
+typedef struct ldOrder {
+	u32 index;
+	v2 position;
+	f32 timer;
+	u32 assignedDriver;
+} ldOrder;
+
 typedef struct ldCar {
 	v2 position;
 	nav_route route;
@@ -51,9 +64,20 @@ typedef struct ldCar {
 	f32 speed;
 	f32 nodeProgress;
 	f32 onBreak;
-    xiImageHandle images[3];
     ldCarDir direction;
+    b8 goToStore;
+	ldOrder *assignedOrders[4];
 } ldCar;
+
+typedef struct ldStore {
+	v2 position;
+	u32 index;
+	u32 orderCount;
+	ldOrder orders[LD_MAX_STORE_ORDERS];
+	f32 orderDelayMax;
+	f32 orderDelayMin;
+	f32 nextOrderIn;
+} ldStore;
 
 typedef union ldMusicTag {
     struct {
@@ -105,8 +129,20 @@ struct ldModePlay {
 
     u32 node_count;
     nav_mesh_node *nodes;
-	ldCar cars[500];
+
+	// Cars
+	u32 selectedCar;
 	u32 carCount;
+	ldCar cars[25];
+    xiImageHandle carImages[6];
+
+	// Stores
+	u32 storeCount;
+	ldStore stores[10];
+	xiImageHandle storeMarker;
+	xiImageHandle orderMarker;
+	xiImageHandle orderMarkerAssigned;
+	xiImageHandle orderBubble;
 
     struct {
         xiImageHandle  images[LD_CLOUD_VARIATION_COUNT];
@@ -134,6 +170,13 @@ struct ldModePlay {
 
     xiLogger log;
 };
+
+static b8 pointInRect(v2 point, rect2 rect) {
+	return point.x > rect.min.x &&
+		point.x < rect.max.x &&
+		point.y > rect.min.y &&
+		point.y < rect.max.y;
+}
 
 static void ludum_music_layers_configure(ldModePlay *play, xiContext *xi) {
     xiAssetManager *assets = &xi->assets;
@@ -348,20 +391,41 @@ static void ludum_cloud_add(ldModePlay *play) {
     play->clouds.timer = xi_rng_range_f32(rng, LD_CLOUD_MIN_SPAWN_TIME, LD_CLOUD_MAX_SPAWN_TIME);
 }
 
+static u32 ludum_find_street_node(ldModePlay *play, u32 start_node) {
+	u32 nodeIndex;
+	do {
+		nodeIndex = xi_rng_choice_u32(&play->rng, play->node_count);
+	} while(play->nodes[nodeIndex].motorway || nodeIndex == start_node);
+	return nodeIndex;
+}
+
 static void ludum_car_init(ldModePlay *play, xiAssetManager *assets) {
 	for(u32 i = 0; i < play->carCount; i++) {
 		ldCar *car = &play->cars[i];
 		u32 start = xi_rng_choice_u32(&play->rng, play->node_count);
-		u32 end = xi_rng_choice_u32(&play->rng, play->node_count);
+		u32 end = ludum_find_street_node(play, start);
+		car->goToStore = false;
 		car->route = generateRoute(play->arena, &NAV_MESH, start, end);
-		car->speed = 0.1f;
+		car->speed = 0.2;
 		car->currentRouteStopTarget = 1;
 		car->nodeProgress = 0;
         nav_mesh_node *node = &play->nodes[car->route.stops[car->currentRouteStopTarget-1]];
 		car->position = xi_v2_create(node->x, node->y);
-        car->images[LD_CAR_DIR_FRONT] = xi_image_get_by_name_str(assets, xi_str_wrap_cstr("car_front"));
-        car->images[LD_CAR_DIR_SIDE] = xi_image_get_by_name_str(assets, xi_str_wrap_cstr("car_side"));
-        car->images[LD_CAR_DIR_BACK] = xi_image_get_by_name_str(assets, xi_str_wrap_cstr("car_back"));
+	}
+}
+
+static void ludum_store_init(ldModePlay *play, xiAssetManager *assets) {
+	for(u32 i = 0; i < play->storeCount; i++) {
+		ldStore *store = &play->stores[i];
+		u32 location = ludum_find_street_node(play, 0);
+        nav_mesh_node *node = &play->nodes[location];
+		store->index = location;
+		store->orderCount = 0;
+		store->orderDelayMax = 20;
+		store->orderDelayMin = 18;
+		// Give the player 7 seconds before adding an order?
+		store->nextOrderIn = 7;
+		store->position = xi_v2_create(node->x, node->y);
 	}
 }
 
@@ -443,8 +507,21 @@ static void ludum_mode_play_init(ldContext *ld) {
         ludum_music_layers_configure(play, xi);
 
         play->map = xi_image_get_by_name(&xi->assets, "map_full");
-		play->carCount = 499;
+		play->carCount = 1;
+		play->storeMarker = xi_image_get_by_name(&xi->assets, "restaurantMarker");
+		play->orderMarker = xi_image_get_by_name(&xi->assets, "orderMarker");
+		play->orderMarkerAssigned = xi_image_get_by_name(&xi->assets, "orderMarkerAssigned");
+		play->orderBubble = xi_image_get_by_name(&xi->assets, "pulse");
+		play->storeCount = 1;
+		ludum_store_init(play, &xi->assets);
 		ludum_car_init(play, &xi->assets);
+		play->selectedCar = -1;
+        play->carImages[LD_CAR_DIR_FRONT] = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("car_front"));
+        play->carImages[LD_CAR_DIR_SIDE] = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("car_side"));
+        play->carImages[LD_CAR_DIR_BACK] = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("car_back"));
+        play->carImages[LD_CAR_DIR_FRONT_SELECTED] = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("car_front_selected"));
+        play->carImages[LD_CAR_DIR_SIDE_SELECTED] = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("car_side_selected"));
+        play->carImages[LD_CAR_DIR_BACK_SELECTED] = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("car_back_selected"));
 
         ld->mode = LD_MODE_PLAY;
     }
@@ -452,6 +529,29 @@ static void ludum_mode_play_init(ldContext *ld) {
     ld->play = play;
 }
 
+static void ludum_store_update(ldModePlay *play, f32 delta) {
+	for(int i = 0; i < play->storeCount; i++) {
+		ldStore *store = &play->stores[i];
+		store->nextOrderIn -= delta;
+		if (store->nextOrderIn < 0 && store->orderCount < LD_MAX_STORE_ORDERS) {
+            xi_log(&play->log, "order", "new order incoming!");
+			ldOrder *order = &store->orders[store->orderCount];
+			order->index = ludum_find_street_node(play, store->index);
+			nav_mesh_node *node = &play->nodes[order->index];
+			order->position = xi_v2_create(node->x, node->y);
+			// TODO: change this to how far the shop is away?
+			order->timer = 60;
+			order->assignedDriver = -1;
+			store->orderCount++;
+			store->nextOrderIn = store->orderDelayMin + xi_rng_choice_u32(&play->rng, store->orderDelayMax-store->orderDelayMin)
+;
+		}
+		for(int it = 0; it < store->orderCount; it++) {
+			ldOrder *order = &store->orders[it];
+			order->timer -= delta;
+		}
+	}
+}
 static void ludum_car_update(ldModePlay *play, f32 delta) {
 	for(int i = 0; i < play->carCount; i++) {
 		ldCar *car = &play->cars[i];
@@ -484,10 +584,14 @@ static void ludum_car_update(ldModePlay *play, f32 delta) {
 			car->nodeProgress = 0;
 			car->currentRouteStopTarget += 1;
 			if(car->currentRouteStopTarget == car->route.stop_count){
-				u32 end = xi_rng_choice_u32(&play->rng, play->node_count);
+				car->goToStore = !car->goToStore;
+				u32 end = ludum_find_street_node(play, endStop);
+				if(car->goToStore){
+        			u32 storeIndex = xi_rng_choice_u32(&play->rng, play->storeCount);
+					end = play->stores[storeIndex].index;
+				}
 				car->route = generateRoute(play->arena, &NAV_MESH, end, endStop);
 				car->currentRouteStopTarget = 1;
-                // xi_log(&play->log, "routing", "new route between %d and %d", endStop, end);
 				car->onBreak = 1.5f;
 			}
 			startStop = car->route.stops[car->currentRouteStopTarget-1];
@@ -513,9 +617,15 @@ static void ludum_mode_play_simulate(ldModePlay *play) {
 
     play->music.timer += xi->time.delta.s;
 
-    if (kb->keys['m'].pressed) {
-        ludum_music_layer_random_play(play, audio);
-    }
+    v2u window_dim = xi->renderer.setup.window_dim;
+    f32 aspect = (f32) window_dim.w / (f32) window_dim.h;
+    v3 x = xi_v3_create(1, 0, 0);
+    v3 y = xi_v3_create(0, 1, 0);
+    v3 z = xi_v3_create(0, 0, 1);
+
+    v3 p = xi_v3_from_v2(play->camera_p, play->zoom);
+    xiCameraTransform camera;
+    xi_camera_transform_get_from_axes(&camera, aspect, x, y, z, p, 0);
 
     if (kb->alt) {
         play->max_zoom = LD_DEBUG_MAX_ZOOM;
@@ -531,20 +641,42 @@ static void ludum_mode_play_simulate(ldModePlay *play) {
     play->zoom += (1.88f * mouse->delta.wheel.y * dt);
     play->zoom  = XI_CLAMP(play->zoom, LD_DEFAULT_MIN_ZOOM, play->max_zoom);
 
-    if (mouse->left.down) {
+	if (mouse->left.pressed && xi_v2_length(mouse->delta.clip) == 0) {
+        xi_log(&play->log, "input", "pressed");
+		u32 pastSelected = play->selectedCar;
+		play->selectedCar = -1;
+		for(u32 i = 0; i < play->carCount; i++) {
+			ldCar *car = &play->cars[i];
+			rect2 carHitbox = {0};
+			carHitbox.min = xi_v2_create(
+				car->position.x - LD_CAR_HIT_BOX_SIZE/2,
+				car->position.y - LD_CAR_HIT_BOX_SIZE/2
+			);
+			carHitbox.max = xi_v2_create(
+				car->position.x + LD_CAR_HIT_BOX_SIZE/2,
+				car->position.y + LD_CAR_HIT_BOX_SIZE/2
+			);
+			v3 mouseUnprojectedV3 = xi_unproject_xy(&camera, mouse->position.clip);
+			v2 mouseUnprojected = xi_v2_create(mouseUnprojectedV3.x, mouseUnprojectedV3.y);
+			if(pointInRect(mouseUnprojected, carHitbox)) {
+				play->selectedCar = i;
+                xi_log(&play->log, "car", "selected a car %d", i);
+				break;
+			}
+		}
+		if(play->selectedCar != pastSelected && play->selectedCar!=-1) {
+        	ludum_music_layer_random_play(play, audio);
+		} else if(play->selectedCar == -1) {
+			xi_music_layer_disable_by_tag(audio, play->music.current.value, XI_MUSIC_LAYER_EFFECT_FADE, 0.5f);
+			play->music.playing = false;
+			play->music.plays   = 0;
+		}
+	} else if (mouse->left.down) {
         v2 dist = xi_v2_mul_f32(xi_v2_neg(mouse->delta.clip), 0.88f * play->zoom);
         play->camera_p = xi_v2_add(play->camera_p, dist);
     }
 
-    v2u window_dim = xi->renderer.setup.window_dim;
-    f32 aspect = (f32) window_dim.w / (f32) window_dim.h;
-    v3 x = xi_v3_create(1, 0, 0);
-    v3 y = xi_v3_create(0, 1, 0);
-    v3 z = xi_v3_create(0, 0, 1);
-
-    v3 p = xi_v3_from_v2(play->camera_p, play->zoom);
-
-    xiCameraTransform camera;
+    p = xi_v3_from_v2(play->camera_p, play->zoom);
     xi_camera_transform_get_from_axes(&camera, aspect, x, y, z, p, 0);
 
     play->clouds.timer -= dt;
@@ -597,7 +729,11 @@ static void ludum_mode_play_simulate(ldModePlay *play) {
         if (bounds.max.y > play->max_camera.y) { play->camera_p.y += (play->max_camera.y - bounds.max.y); }
     }
 
-    play->angle += dt;
+	ludum_store_update(play, dt);
+
+	// handle car updates
+    //
+	ludum_car_update(play, dt);
 
     // handle audio events to play music correctly
     //
@@ -646,14 +782,6 @@ static void ludum_mode_play_simulate(ldModePlay *play) {
 
                         play->music.current.radio = false;
                     }
-
-                    if (play->music.plays > 2) {
-                        xi_music_layer_disable_by_tag(audio, e->tag, XI_MUSIC_LAYER_EFFECT_FADE, 0.5f);
-                        play->music.playing = false;
-                        play->music.plays   = 0;
-
-                        xi_log(&play->log, "audio", "disabling music...");
-                    }
                 }
                 else {
                     xi_log(&play->log, "audio", "we looped music that isn't current!");
@@ -662,8 +790,6 @@ static void ludum_mode_play_simulate(ldModePlay *play) {
             break;
         }
     }
-	// handle car updates
-	ludum_car_update(play, dt);
 }
 
 static void ludum_mode_play_render(ldModePlay *play, xiRenderer *renderer) {
@@ -679,6 +805,7 @@ static void ludum_mode_play_render(ldModePlay *play, xiRenderer *renderer) {
     v3 p = xi_v3_from_v2(play->camera_p, play->zoom);
 
     xi_camera_transform_set_from_axes(renderer, x, y, z, p, 0);
+	rect3 cameraBounds = xi_camera_bounds_get(&renderer->camera);
 
 
 
@@ -703,18 +830,28 @@ static void ludum_mode_play_render(ldModePlay *play, xiRenderer *renderer) {
 		}
 		*/
 		ldCar car = play->cars[i];
-        xi_sprite_draw_xy_scaled(renderer, car.images[car.direction], car.position, 0.1, 0);
+		v4 b = xi_v4_create(0, 0, 1, 1);
+		u32 selectedOffset = 0;
+		if(play->selectedCar==i)
+			selectedOffset = 3;
+        xi_sprite_draw_xy_scaled(renderer, play->carImages[car.direction+selectedOffset], car.position, 0.1, 0);
+	}
+
+	// draw stores
+	for(u32 i = 0; i < play->storeCount; i++) {
+        xi_sprite_draw_xy_scaled(renderer, play->storeMarker, play->stores[i].position, 0.1, 0);
+		for(u32 it = 0; it < play->stores[i].orderCount; it++) {
+			ldOrder order = play->stores[i].orders[it];
+			xiImageHandle marker = play->orderMarkerAssigned;
+			if(play->stores[i].orders[it].assignedDriver == -1) {
+				marker = play->orderMarker;
+        		xi_sprite_draw_xy_scaled(renderer, play->orderBubble, order.position, 0.1+xi_sin(order.timer), 0);
+			}
+        	xi_sprite_draw_xy_scaled(renderer, marker, order.position, 0.1, 0);
+		}
+
 	}
     xi_quad_outline_draw_xy(renderer, xi_v4_create(1, 0, 0, 1), map_center, map_bounds, 0, 0.02f);
-
-    for (u32 it = 0; it < play->node_count; ++it) {
-        nav_mesh_node *node = &play->nodes[it];
-
-        v4 r = xi_v4_create(1, 0, 0, 1);
-
-        v2 node_p = xi_v2_create(node->x, node->y);
-        xi_quad_draw_xy(renderer, r, node_p, xi_v2_create(0.02, 0.02), 0);
-    }
 
     f32 cloud_scale = 2.8f;
 
