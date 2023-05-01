@@ -3,6 +3,7 @@
 #include "nav_mesh.c"
 
 #include "ludum_mode_play.c"
+#include "ludum_mode_menu.c"
 
 extern XI_EXPORT XI_GAME_INIT(xiContext *xi, xi_u32 type) {
     XI_ASSERT(xi->version.major == XI_VERSION_MAJOR);
@@ -15,6 +16,7 @@ extern XI_EXPORT XI_GAME_INIT(xiContext *xi, xi_u32 type) {
 
             xi->window.width  = 1600;
             xi->window.height = 900;
+            xi->window.title  = xi_str_wrap_const("you guys don't have pizza?");
 
             xi->time.delta.fixed_hz = 60;
 
@@ -73,7 +75,10 @@ extern XI_EXPORT XI_GAME_INIT(xiContext *xi, xi_u32 type) {
             ld->xi = xi;
             xi_arena_init_virtual(&ld->mode_arena, XI_GB(4));
 
-            ludum_mode_play_init(ld);
+            // ludum_mode_play_init(ld);
+            //
+            ludum_mode_menu_init(ld);
+
             xi->user = ld;
 
             // TODO: @todo remove this debug path finding call
@@ -103,8 +108,11 @@ extern XI_EXPORT XI_GAME_SIMULATE(xiContext *xi) {
 
     if (ld) {
         switch (ld->mode) {
-            case LD_MODE_NONE: { /* do nothing...        */ } break;
-            case LD_MODE_MENU: { /* @incomplete: no menu */ } break;
+            case LD_MODE_NONE: { /* do nothing... */ } break;
+            case LD_MODE_MENU: {
+                ludum_mode_menu_simulate(ld->menu);
+            }
+            break;
             case LD_MODE_PLAY: {
                 ludum_mode_play_simulate(ld->play);
             }
@@ -118,8 +126,11 @@ extern XI_EXPORT XI_GAME_RENDER(xiContext *xi, xiRenderer *renderer) {
 
     if (ld) {
         switch (ld->mode) {
-            case LD_MODE_NONE: { /* do nothing...        */ } break;
-            case LD_MODE_MENU: { /* @incomplete: no menu */ } break;
+            case LD_MODE_NONE: { /* do nothing... */ } break;
+            case LD_MODE_MENU: {
+                ludum_mode_menu_render(ld->menu, renderer);
+            }
+            break;
             case LD_MODE_PLAY: {
                 ludum_mode_play_render(ld->play, renderer);
             }
