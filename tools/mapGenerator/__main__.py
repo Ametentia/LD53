@@ -1,78 +1,118 @@
-"""It's me writing python wow // Matt"""
-import ctypes
 from PIL import Image, ImageDraw
+import uuid
 
-GROUP_LOCALITY = 5 ** 2
-CONNECTION_LOCALITY = 10 ** 2
-MAX_CONNECTIONS = 12
+MAP_FILE_NAME = "./map_roads.png"
+MOTORWAY_COLOUR = (211, 214, 161)
 
+MOTOR_WAY_DISTANCE = 40 ** 2
+STREET_DISTANCE = 20 ** 2
+DEGENERATE_STEPS = 8
+MAX_STREET_DEGEN = 5
+MAX_CONNECTIONS = 32
 
-def find_local_point(groups, x, y):
-    for group in groups:
-        xDiff = (group[0] - x)
-        yDiff = (group[1] - y)
-        if  xDiff*xDiff + yDiff*yDiff >= GROUP_LOCALITY:
+def create_node(pixel_data, index, node_dict, x, y):
+    motorway = pixel_data[x, y][0:3] == MOTORWAY_COLOUR
+    node = {
+        "id": str(uuid.uuid4()),
+        "x": x,
+        "y": y,
+        "motorway": motorway,
+        "connections": {},
+        "merged": -1
+    }
+    for xDiff in range(-1, 1):
+        for yDiff in range(-1, 1):
+            if node_dict.get(x + xDiff, {}).get(y + yDiff):
+                connection = node_dict[x + xDiff][y + yDiff]
+                node["connections"][connection["id"]] = connection
+                connection["connections"][node["id"]] = node
+    if not node_dict.get(x):
+        node_dict[x] = {}
+    node_dict[x][y] = node
+    return node
+
+def degenerate(nodes, stage):
+    new_nodes = []
+
+    for node in nodes:
+        if node["merged"] == stage:
             continue
-        return group
-    return None
-
+        elif not node["motorway"] and stage > MAX_STREET_DEGEN:
+            new_nodes.append(node)
+            continue
+        merge_node = None
+        for connection in node["connections"].values():
+            if (not connection["motorway"] and stage > MAX_STREET_DEGEN):
+                continue
+            if connection["merged"] < stage:
+                merge_node = connection
+            break
+        if not merge_node:
+            new_nodes.append(node)
+            continue
+        del merge_node["connections"][node["id"]]
+        del node["connections"][merge_node["id"]]
+        new_node = {
+            "id": str(uuid.uuid4()),
+            "x": int((merge_node["x"] + node["x"])/2),
+            "y": int((merge_node["y"] + node["y"])/2),
+            "motorway": merge_node["motorway"] or node["motorway"],
+            "connections": merge_node["connections"] | node["connections"],
+            "merged": stage
+        }
+        node["merged"] = stage
+        merge_node["merged"] = stage
+        for connected_node in new_node["connections"].values():
+            if node["id"] in connected_node["connections"]:
+                del connected_node["connections"][node["id"]]
+            if merge_node["id"] in connected_node["connections"]:
+                del connected_node["connections"][merge_node["id"]]
+            connected_node["connections"][new_node["id"]] = new_node
+        new_nodes.append(new_node)
+    return new_nodes
 
 def generate():
-    map = Image.open("./testMap.png")
+    map = Image.open(MAP_FILE_NAME)
     pixel_data = map.load()
-
-    print(f"Map texture is {map.size}")
-    print("Generating points")
-    points = []
+    node_dict = {}
+    nodes = []
+    print(f"Map Texture is {map.size}")
+    print("Generating Initial HUGE graph")
     for y in range(map.size[1]):
         for x in range(map.size[0]):
             if not pixel_data[x, y][3]:
                 continue
-            points.append((x, y))
+            nodes.append(create_node(pixel_data, len(nodes), node_dict, x, y))
 
-    print(f"Points created, squashing nearby points (Size {GROUP_LOCALITY})")
-    groups = []
-    for point in points:
-        if find_local_point(groups, point[0], point[1]) is None:
-            groups.append(point)
-    print(f"{len(groups)} nodes after squash.")
-    print("Creating connections")
+    for i in range(DEGENERATE_STEPS):
+        print(f"Degenerating {i} (Nodes: {len(nodes)})")
+        nodes = degenerate(nodes, i)
+        print(f"Degenerate {i} done. (Now {len(nodes)} nodes)")
 
-    nodes = []
-    for index, point in enumerate(groups):
-        node = {
-            "index": index,
-            "x": point[0],
-            "y": point[1],
-            "connections": []
-        }
-        nodes.append(node)
-    max_con = 0
-    for node in nodes:
-        for checkNode in nodes:
-            if node["index"] == checkNode["index"]:
-                continue
-            xDiff = (node["x"] - checkNode["x"])
-            yDiff = (node["y"] - checkNode["y"])
-            if xDiff*xDiff + yDiff*yDiff > CONNECTION_LOCALITY:
-                continue
-            node["connections"].append(checkNode["index"])
-        max_con = max(max_con, len(node["connections"]))
-    print(f"Done, Max connections seen {max_con}")
-    if max_con > MAX_CONNECTIONS:
-        print("MAX CONNECTIONS EXCEEDED, UPDATE STRUCT TO MATCH")
-        return
+    for index, node in enumerate(nodes):
+        node["index"] = index
 
+    for index, node in enumerate(nodes):
+        node["connections"] = list({connection["index"] for connection in node["connections"].values()})
+        if len(node["connections"]) > MAX_CONNECTIONS:
+            print("OVER MAX CONNECTIONS")
+
+    print(f"final node count {len(nodes)}")
     new = Image.new(mode="RGB", size=map.size)
     connectedImage = ImageDraw.Draw(new)
-    for point in groups:
-        new.putpixel([point[0], point[1]], (255, 255, 255))
+    for point in nodes:
+        colour = (255, 255, 255)
+        if point["motorway"]:
+            colour = (255, 0, 0)
+        new.putpixel([point["x"], point["y"]], colour)
+    new.save("points.png")
     for node in nodes:
         for connection in node["connections"]:
             con = nodes[connection]
-            connectedImage.line([node["x"], node["y"], con["x"], con["y"]], fill="yellow", width=1)
-    new.show()
-    new.save("navMesh.png")
+            colour = "red"
+            if(node["motorway"] and con["motorway"]):
+                colour = "yellow"
+            connectedImage.line([node["x"], node["y"], con["x"], con["y"]], fill=colour, width=1)
 
     print("Creating Struct file")
     with open("../../code/nav_mesh_data.h", "w") as f:
@@ -85,6 +125,7 @@ nav_mesh_node NAV_MESH_NODES[] = {
         for node in nodes:
             f.write(f"{{{str(node['x'])}, \n")
             f.write(f"{str(node['y'])}, \n")
+            f.write(f"{str(int(node['motorway']))}, \n")
             f.write(f"{str(len(node['connections']))}, \n")
             f.write("{\n")
             for x in range(MAX_CONNECTIONS):
@@ -107,7 +148,8 @@ nav_mesh_node NAV_MESH_NODES[] = {
         f.write(f"{str(len(nodes))},\n")
         f.write("NAV_MESH_NODES};\n")
         f.write("#endif\n")
-
+    new.show()
+    new.save("navMesh.png")
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@
 typedef struct nav_mesh_node {
 	xi_f32 x;
 	xi_f32 y;
+	xi_u32 motorway;
 	xi_u32 connectionCount;
 	xi_u32 connections[32];
 } nav_mesh_node;
@@ -16,9 +17,14 @@ typedef struct nav_mesh {
 //
 #include "nav_mesh_data.h"
 
+double diff_timespec(const struct timespec *time1, const struct timespec *time0) {
+  return (time1->tv_sec - time0->tv_sec)
+      + (time1->tv_nsec - time0->tv_nsec) / 1000000000.0;
+}
+
 int *generateRoute(nav_mesh *mesh, xi_u32 currentIndex, xi_u32 targetIndex) {
-	clock_t t;
-	t = clock();
+	struct timespec start, finish, delta;
+	clock_gettime(CLOCK_MONOTONIC, &start);
 
     XI_ASSERT(targetIndex < mesh->nodeCount);
 
@@ -55,9 +61,6 @@ int *generateRoute(nav_mesh *mesh, xi_u32 currentIndex, xi_u32 targetIndex) {
 		for(xi_u32 i = 0; i < mesh->nodes[currentIndex].connectionCount; i++) {
 			checkNode = mesh->nodes[currentIndex].connections[i];
 
-			if(nodeVisited[checkNode])
-				continue;
-
 			if(!nodeChecked[checkNode]){
 				checkedNodes[checkedNodeCount] = checkNode;
 				checkedNodeCount++;
@@ -66,8 +69,12 @@ int *generateRoute(nav_mesh *mesh, xi_u32 currentIndex, xi_u32 targetIndex) {
 
 			xDiff = ABS(mesh->nodes[targetIndex].x - mesh->nodes[checkNode].x);
 			yDiff = ABS(mesh->nodes[targetIndex].y - mesh->nodes[checkNode].y);
+			u32 travelCost = 1;
+			if(!mesh->nodes[checkNode].motorway) {
+				travelCost = 1000;
+			}
 
-			calDistance = xDiff+yDiff+1+nodeDistance[currentIndex];
+			calDistance = xDiff+yDiff+travelCost+nodeDistance[currentIndex];
 			if(nodeDistance[checkNode] > calDistance) {
 				nodeDistance[checkNode] = calDistance;
 				backTrackNode[checkNode] = currentIndex;
@@ -99,8 +106,8 @@ int *generateRoute(nav_mesh *mesh, xi_u32 currentIndex, xi_u32 targetIndex) {
 	while(currentIndex!=startNode)
 		currentIndex = backTrackNode[currentIndex];
 
-	t = clock() - t;
-	double timeTaken = ((double)t/(CLOCKS_PER_SEC/1000.0));
+	clock_gettime(CLOCK_MONOTONIC, &finish);
+   	double timetaken = diff_timespec(&finish, &start);
 
 	return 0;
 }
