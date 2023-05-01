@@ -53,11 +53,15 @@ enum ldMusicType {
 static const u32   ld_music_type_counts[LD_MUSIC_TYPE_COUNT]   = { 1,       1,         1,      2,        1      };
 static const char *ld_music_type_prefixes[LD_MUSIC_TYPE_COUNT] = { "chill", "country", "funk", "hiphop", "rock" };
 
+typedef struct ldStore ldStore;
+
 typedef struct ldOrder {
 	u32 index;
 	v2 position;
 	f32 timer;
 	u32 assignedDriver;
+
+    ldStore *store;
 } ldOrder;
 
 typedef struct ldCar {
@@ -104,7 +108,6 @@ typedef struct ldCloudState {
     f32 layer;
     f32 speed;
     f32 scale;
-    f32 darkness;
 
     ldCloudState *next;
 } ldCloudState;
@@ -365,7 +368,6 @@ static void ludum_cloud_add(ldModePlay *play) {
             // no clouds in list so just push onto head
             //
             play->clouds.clouds = cloud;
-            xi_log(&play->log, "clouds", "no cloud, setting to head");
         }
         else {
             ldCloudState *prev = 0;
@@ -418,19 +420,64 @@ static u32 ludum_find_street_node(ldModePlay *play, u32 start_node) {
 	return nodeIndex;
 }
 
+static u32 ludum_street_node_find_within_distance(ldModePlay *play, u32 start_node, v2 from, f32 dist) {
+	u32 result;
+
+    f32 dist2 = (dist * dist);
+
+#define MAX_ITERS 20
+
+    b32 found = false;
+	for (u32 it = 0; it < MAX_ITERS; ++it) {
+		result = xi_rng_choice_u32(&play->rng, play->node_count);
+
+        nav_mesh_node *node = &play->nodes[result];
+
+        if (result != start_node && !node->motorway) {
+            v2 p     = xi_v2_create(node->x, node->y);
+            v2 dir   = xi_v2_sub(from, p);
+            f32 len2 = xi_v2_dot(dir, dir);
+
+            if (len2 <= dist2) {
+                found = true;
+                break;
+            }
+        }
+	}
+
+    if (!found) { result = XI_U32_MAX; }
+
+
+	return result;
+}
+
 static void ludum_car_init(ldModePlay *play, xiAssetManager *assets) {
+    XI_ASSERT(play->storeCount > 0);
+
+    xiArena *temp = xi_temp_get();
+
+    ldStore *store = &play->stores[0];
 	for(u32 i = 0; i < play->carCount; i++) {
 		ldCar *car = &play->cars[i];
-		u32 start = xi_rng_choice_u32(&play->rng, play->node_count);
+
+		u32 start;
+        do {
+            start = ludum_street_node_find_within_distance(play, store->index, store->position, 2);
+        } while (start == XI_U32_MAX);
+
 		u32 end = ludum_find_street_node(play, start);
-		car->goToStore = false;
-		car->route = generateRoute(play->arena, &NAV_MESH, start, end);
-		car->speed = 0.2;
-		car->orderCount = 0;
-		car->orderOffset = 0;
-		car->currentRouteStopTarget = 1;
+
+		car->goToStore    = false;
+		car->route        = generateRoute(play->arena, &NAV_MESH, start, end);
+		car->speed        = 1.0f;
+		car->orderCount   = 0;
+		car->orderOffset  = 0;
 		car->nodeProgress = 0;
-        nav_mesh_node *node = &play->nodes[car->route.stops[car->currentRouteStopTarget-1]];
+
+        u32 stop_index = car->route.stop_count - 1;
+		car->currentRouteStopTarget = stop_index;
+
+        nav_mesh_node *node = &play->nodes[car->route.stops[stop_index]];
 		car->position = xi_v2_create(node->x, node->y);
 	}
 }
@@ -461,7 +508,7 @@ static void ludum_mode_play_init(ldContext *ld) {
 
         xiArena *temp = xi_temp_get();
 
-        xi_logger_create(play->arena, &play->log, xi->system.out, 512);
+        xi_logger_create(play->arena, &play->log, xi->system.out, 4096);
 
         play->ld    = ld;
         play->angle = 0;
@@ -559,18 +606,31 @@ static void ludum_store_update(ldModePlay *play, f32 delta) {
 
 		store->nextOrderIn -= delta;
 		if (store->nextOrderIn < 0 && store->orderCount < LD_MAX_STORE_ORDERS) {
-            xi_log(&play->log, "order", "new order incoming!");
-
 			ldOrder *order = &store->orders[store->orderCount];
-			order->index = ludum_find_street_node(play, store->index);
 
-			nav_mesh_node *node = &play->nodes[order->index];
-			order->position = xi_v2_create(node->x, node->y);
 			// TODO: change this to how far the shop is away?
-			order->timer = 60;
-			order->assignedDriver = -1;
-			store->orderCount++;
-			store->nextOrderIn = store->orderDelayMin + xi_rng_choice_u32(&play->rng, store->orderDelayMax-store->orderDelayMin);
+            //
+            u32 index = ludum_street_node_find_within_distance(play, store->index, store->position, 2.0f);
+            if (index != XI_U32_MAX) {
+                nav_mesh_node *node = &play->nodes[index];
+
+                order->index          = index;
+                order->assignedDriver = -1;
+                order->store          = store;
+
+                v2 order_pos = xi_v2_create(node->x, node->y);
+                f32 distance = xi_v2_length(xi_v2_sub(store->position, order_pos));
+
+                order->timer    = 60;
+                order->position = order_pos;
+
+                store->orderCount++;
+            }
+            else {
+                xi_log(&play->log, "order", "failed to find suitable node to spawn order");
+            }
+
+			store->nextOrderIn = xi_rng_range_f32(&play->rng, store->orderDelayMin, store->orderDelayMax);
 		}
 
 		for(int it = 0; it < store->orderCount; it++) {
@@ -582,54 +642,70 @@ static void ludum_store_update(ldModePlay *play, f32 delta) {
 static void ludum_car_update(ldModePlay *play, f32 delta) {
 	for(int i = 0; i < play->carCount; i++) {
 		ldCar *car = &play->cars[i];
+
 		if(car->onBreak > 0) {
 			car->onBreak -= delta;
 			continue;
 		}
+
 		car->nodeProgress += delta;
-		u32 startStop = car->route.stops[car->currentRouteStopTarget-1];
-		u32 endStop = car->route.stops[car->currentRouteStopTarget];
+
+        XI_ASSERT(car->currentRouteStopTarget > 0);
+
+		u32 startStop = car->route.stops[car->currentRouteStopTarget];
+		u32 endStop = car->route.stops[car->currentRouteStopTarget - 1];
+
 		nav_mesh_node *currentNode = &play->nodes[startStop];
 		nav_mesh_node *targetNode = &play->nodes[endStop];
-		v2 startV2 = xi_v2_create(currentNode->x, currentNode->y);
-		v2 endV2 = xi_v2_create(targetNode->x, targetNode->y);
-		v2 direction = xi_v2_sub(startV2, endV2);
+
+		v2 start_p = xi_v2_create(currentNode->x, currentNode->y);
+		v2 end_p   = xi_v2_create(targetNode->x,  targetNode->y);
+
+		v2 direction = xi_v2_sub(start_p, end_p);
+
 		car->direction = LD_CAR_DIR_BACK;
-		if(ABS(direction.x) > ABS(direction.y)){
+		if (ABS(direction.x) > ABS(direction.y)) {
 			car->direction = LD_CAR_DIR_SIDE;
 		} else if(direction.y > 0) {
 			car->direction = LD_CAR_DIR_FRONT;
 		}
-		f32 distance = xi_v2_length(xi_v2_sub(startV2, endV2));
-		f32 speedMultiplier = 1;
-		if(targetNode->motorway) {
-			speedMultiplier = 2;
-		}
+
+		f32 distance = xi_v2_length(direction);
+
+		f32 speedMultiplier   = targetNode->motorway ? 2 : 1;
 		f32 travelledDistance = car->speed * speedMultiplier * car->nodeProgress;
-		f32 progress = travelledDistance/distance;
-		if(progress >= 1){
+
+		f32 progress = travelledDistance / distance;
+		if (progress >= 1) {
 			car->nodeProgress = 0;
-			car->currentRouteStopTarget += 1;
-			if(car->currentRouteStopTarget == car->route.stop_count){
+			car->currentRouteStopTarget -= 1;
+
+			if(car->currentRouteStopTarget == 0) { // car->route.stop_count){
 				car->goToStore = !car->goToStore;
+
 				u32 end = ludum_find_street_node(play, endStop);
-				if(car->goToStore){
+				if (car->goToStore) {
         			u32 storeIndex = xi_rng_choice_u32(&play->rng, play->storeCount);
 					end = play->stores[storeIndex].index;
 				}
-				car->route = generateRoute(play->arena, &NAV_MESH, end, endStop);
-				car->currentRouteStopTarget = 1;
+
+				car->route = generateRoute(play->arena, &NAV_MESH, endStop, end); // endStop and end were flipped
+				car->currentRouteStopTarget = car->route.stop_count - 1;
 				car->onBreak = 1.5f;
 			}
-			startStop = car->route.stops[car->currentRouteStopTarget-1];
-			endStop = car->route.stops[car->currentRouteStopTarget];
+
+			startStop = car->route.stops[car->currentRouteStopTarget];
+			endStop   = car->route.stops[car->currentRouteStopTarget - 1];
+
 			currentNode = &play->nodes[startStop];
-			targetNode = &play->nodes[endStop];
+			targetNode  = &play->nodes[endStop];
+
 			progress = 0;
-			startV2 = xi_v2_create(currentNode->x, currentNode->y);
-			endV2 = xi_v2_create(targetNode->x, targetNode->y);
+			start_p  = xi_v2_create(currentNode->x, currentNode->y);
+			end_p    = xi_v2_create(targetNode->x, targetNode->y);
 		}
-		car->position = xi_lerp_v2(startV2, endV2, progress);
+
+		car->position = xi_lerp_v2(start_p, end_p, progress);
 	}
 }
 
@@ -669,7 +745,6 @@ static void ludum_mode_play_simulate(ldModePlay *play) {
     play->zoom  = XI_CLAMP(play->zoom, LD_DEFAULT_MIN_ZOOM, play->max_zoom);
 
 	if (mouse->left.pressed && xi_v2_length(mouse->delta.clip) == 0) {
-        xi_log(&play->log, "input", "pressed");
 		b8 orderAssigned = false;
 		if(play->selectedCar != -1) {
 			// Check if an order wants to be assigned
@@ -800,7 +875,7 @@ static void ludum_mode_play_simulate(ldModePlay *play) {
 
 	// handle car updates
     //
-	ludum_car_update(play, dt);
+    ludum_car_update(play, dt);
 
     // handle audio events to play music correctly
     //
@@ -849,9 +924,6 @@ static void ludum_mode_play_simulate(ldModePlay *play) {
 
                         play->music.current.radio = false;
                     }
-                }
-                else {
-                    xi_log(&play->log, "audio", "we looped music that isn't current!");
                 }
             }
             break;
