@@ -15,6 +15,14 @@
 
 #define LD_NUM_RADIO_STATIC 7
 
+typedef enum ldCarDir {
+    LD_CAR_DIR_FRONT = 0,
+    LD_CAR_DIR_SIDE,
+    LD_CAR_DIR_BACK,
+
+    LD_CAR_DIR_COUNT
+} ldCarDir;
+
 enum ldMusicType {
     LD_MUSIC_TYPE_CHILL = 0,
     LD_MUSIC_TYPE_COUNTRY,
@@ -27,6 +35,17 @@ enum ldMusicType {
 
 static const u32   ld_music_type_counts[LD_MUSIC_TYPE_COUNT]   = { 1,       1,         1,      2,        1      };
 static const char *ld_music_type_prefixes[LD_MUSIC_TYPE_COUNT] = { "chill", "country", "funk", "hiphop", "rock" };
+
+typedef struct ldCar {
+	v2 position;
+	nav_route route;
+	u32 currentRouteStopTarget;
+	f32 speed;
+	f32 nodeProgress;
+	f32 onBreak;
+    xiImageHandle images[3];
+    ldCarDir direction;
+} ldCar;
 
 typedef union ldMusicTag {
     struct {
@@ -71,6 +90,8 @@ struct ldModePlay {
 
     u32 node_count;
     nav_mesh_node *nodes;
+	ldCar cars[500];
+	u32 carCount;
 
     u32 cloud_count;
     ldCloud clouds[8];
@@ -199,6 +220,23 @@ static void ludum_clouds_init(ldModePlay *play, xiAssetManager *assets) {
     play->cloud_count = count;
 }
 
+static void ludum_car_init(ldModePlay *play, xiAssetManager *assets) {
+	for(u32 i = 0; i < play->carCount; i++) {
+		ldCar *car = &play->cars[i];
+		u32 start = xi_rng_choice_u32(&play->rng, play->node_count);
+		u32 end = xi_rng_choice_u32(&play->rng, play->node_count);
+		car->route = generateRoute(play->arena, &NAV_MESH, start, end);
+		car->speed = 0.1f;
+		car->currentRouteStopTarget = 1;
+		car->nodeProgress = 0;
+        nav_mesh_node *node = &play->nodes[car->route.stops[car->currentRouteStopTarget-1]];
+		car->position = xi_v2_create(node->x, node->y);
+        car->images[LD_CAR_DIR_FRONT] = xi_image_get_by_name_str(assets, xi_str_wrap_cstr("car_front"));
+        car->images[LD_CAR_DIR_SIDE] = xi_image_get_by_name_str(assets, xi_str_wrap_cstr("car_side"));
+        car->images[LD_CAR_DIR_BACK] = xi_image_get_by_name_str(assets, xi_str_wrap_cstr("car_back"));
+	}
+}
+
 static void ludum_mode_play_init(ldContext *ld) {
     xi_arena_reset(&ld->mode_arena);
 
@@ -277,11 +315,63 @@ static void ludum_mode_play_init(ldContext *ld) {
         ludum_music_layers_configure(play, xi);
 
         play->map = xi_image_get_by_name(&xi->assets, "map_full");
+		play->carCount = 499;
+		ludum_car_init(play, &xi->assets);
 
         ld->mode = LD_MODE_PLAY;
     }
 
     ld->play = play;
+}
+
+static void ludum_car_update(ldModePlay *play, f32 delta) {
+	for(int i = 0; i < play->carCount; i++) {
+		ldCar *car = &play->cars[i];
+		if(car->onBreak > 0) {
+			car->onBreak -= delta;
+			continue;
+		}
+		car->nodeProgress += delta;
+		u32 startStop = car->route.stops[car->currentRouteStopTarget-1];
+		u32 endStop = car->route.stops[car->currentRouteStopTarget];
+		nav_mesh_node *currentNode = &play->nodes[startStop];
+		nav_mesh_node *targetNode = &play->nodes[endStop];
+		v2 startV2 = xi_v2_create(currentNode->x, currentNode->y);
+		v2 endV2 = xi_v2_create(targetNode->x, targetNode->y);
+		v2 direction = xi_v2_sub(startV2, endV2);
+		car->direction = LD_CAR_DIR_BACK;
+		if(ABS(direction.x) > ABS(direction.y)){
+			car->direction = LD_CAR_DIR_SIDE;
+		} else if(direction.y > 0) {
+			car->direction = LD_CAR_DIR_FRONT;
+		}
+		f32 distance = xi_v2_length(xi_v2_sub(startV2, endV2));
+		f32 speedMultiplier = 1;
+		if(targetNode->motorway) {
+			speedMultiplier = 2;
+		}
+		f32 travelledDistance = car->speed * speedMultiplier * car->nodeProgress;
+		f32 progress = travelledDistance/distance;
+		if(progress >= 1){
+			car->nodeProgress = 0;
+			car->currentRouteStopTarget += 1;
+			if(car->currentRouteStopTarget == car->route.stop_count){
+				u32 end = xi_rng_choice_u32(&play->rng, play->node_count);
+				car->route = generateRoute(play->arena, &NAV_MESH, end, endStop);
+				car->currentRouteStopTarget = 1;
+                xi_log(&play->log, "routing", "new route between %d and %d", endStop, end);
+				car->onBreak = 1.5f;
+			}
+			startStop = car->route.stops[car->currentRouteStopTarget-1];
+			endStop = car->route.stops[car->currentRouteStopTarget];
+			currentNode = &play->nodes[startStop];
+			targetNode = &play->nodes[endStop];
+			progress = 0;
+			startV2 = xi_v2_create(currentNode->x, currentNode->y);
+			endV2 = xi_v2_create(targetNode->x, targetNode->y);
+		}
+		car->position = xi_lerp_v2(startV2, endV2, progress);
+	}
 }
 
 static void ludum_mode_play_simulate(ldModePlay *play) {
@@ -402,6 +492,8 @@ static void ludum_mode_play_simulate(ldModePlay *play) {
             break;
         }
     }
+	// handle car updates
+	ludum_car_update(play, dt);
 }
 
 static void ludum_mode_play_render(ldModePlay *play, xiRenderer *renderer) {
@@ -421,14 +513,23 @@ static void ludum_mode_play_render(ldModePlay *play, xiRenderer *renderer) {
     xi_f32 scale = XI_MAX(map_bounds.x, map_bounds.y);
     xi_sprite_draw_xy_scaled(renderer, play->map, map_center, scale, 0);
 
-    for (u32 it = 0; it < play->node_count; ++it) {
-        nav_mesh_node *node = &play->nodes[it];
-
-        v4 r = xi_v4_create(1, 0, 0, 1);
-
-        v2 node_p = xi_v2_create(node->x, node->y);
-        xi_quad_draw_xy(renderer, r, node_p, xi_v2_create(0.02, 0.02), 0);
-    }
+	// draw cars
+	for(u32 i = 0; i < play->carCount; i++) {
+		/* CAR ROUTE FOR DEBUG
+		u32 lastStop = play->cars[i].route.stops[0];
+		for (u32 it = 1; it < play->cars[i].route.stop_count; it++) {
+			nav_mesh_node *node1 = &play->nodes[lastStop];
+			v2 node_d1 = xi_v2_create(node1->x, node1->y);
+			nav_mesh_node *node2 = &play->nodes[play->cars[i].route.stops[it]];
+			v2 node_d2 = xi_v2_create(node2->x, node2->y);
+			v4 b = xi_v4_create(0, 0, 1, 1);
+			xi_line_draw_xy(renderer, b, node_d2, b, node_d1, 0.02);
+			lastStop = play->cars[i].route.stops[it];
+		}
+		*/
+		ldCar car = play->cars[i];
+        xi_sprite_draw_xy_scaled(renderer, car.images[car.direction], car.position, 0.1, 0);
+	}
 
     f32 cloud_scale = 2.8f;
 

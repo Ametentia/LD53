@@ -13,22 +13,16 @@ typedef struct nav_mesh {
 	nav_mesh_node *nodes;
 } nav_mesh;
 
+typedef struct nav_route {
+	u32 stop_count;
+	u32 *stops;
+} nav_route;
+
 // :note this header is generated automatically with tools/mapGenerator
 //
 #include "nav_mesh_data.h"
 
-#if XI_OS_LINUX
-double diff_timespec(const struct timespec *time1, const struct timespec *time0) {
-  return (time1->tv_sec - time0->tv_sec)
-      + (time1->tv_nsec - time0->tv_nsec) / 1000000000.0;
-}
-#endif
-
-int *generateRoute(nav_mesh *mesh, xi_u32 currentIndex, xi_u32 targetIndex) {
-#if XI_OS_LINUX
-	struct timespec start, finish, delta;
-	clock_gettime(CLOCK_MONOTONIC, &start);
-#endif
+nav_route generateRoute(xiArena *alloc, nav_mesh *mesh, xi_u32 currentIndex, xi_u32 targetIndex) {
 
     XI_ASSERT(targetIndex < mesh->nodeCount);
 
@@ -96,9 +90,7 @@ int *generateRoute(nav_mesh *mesh, xi_u32 currentIndex, xi_u32 targetIndex) {
 
 				continue;
 			}
-
 			noMisses = false;
-
 			if(nodeDistance[node] < smallestClosest) {
 				smallestClosest = nodeDistance[node];
 				nextNode = node;
@@ -106,14 +98,22 @@ int *generateRoute(nav_mesh *mesh, xi_u32 currentIndex, xi_u32 targetIndex) {
 			}
 		}
 	}
-
-	while(currentIndex!=startNode)
+	currentIndex = targetIndex;
+	u32 stopCount = 0;
+	while(currentIndex!=startNode) {
 		currentIndex = backTrackNode[currentIndex];
+		stopCount++;
+	}
+	currentIndex = targetIndex;
+	nav_route route = {};
+	route.stop_count = stopCount;
+	route.stops = xi_arena_push_array(alloc, xi_u32, stopCount);
+	u32 i = 0;
+	while(currentIndex!=startNode) {
+		route.stops[i] = currentIndex;
+		currentIndex = backTrackNode[currentIndex];
+		i++;
+	}
 
-#if XI_OS_LINUX
-	clock_gettime(CLOCK_MONOTONIC, &finish);
-   	double timetaken = diff_timespec(&finish, &start);
-#endif
-
-	return 0;
+	return route;
 }

@@ -79,7 +79,6 @@ extern XI_EXPORT XI_GAME_INIT(xiContext *xi, xi_u32 type) {
             // TODO: @todo remove this debug path finding call
             //
             XI_ASSERT(NAV_MESH.nodeCount > 0);
-            generateRoute(&NAV_MESH, 0, NAV_MESH.nodeCount - 1);
         }
         break;
         case XI_GAME_RELOADED: {

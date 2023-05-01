@@ -92,10 +92,13 @@ def generate():
     for index, node in enumerate(nodes):
         node["index"] = index
 
+    maxC = 0
     for index, node in enumerate(nodes):
         node["connections"] = list({connection["index"] for connection in node["connections"].values()})
+        maxC = max(maxC, len(node["connections"]))
         if len(node["connections"]) > MAX_CONNECTIONS:
             print("OVER MAX CONNECTIONS")
+    print(f"Max connections seen was {maxC}")
 
     print(f"final node count {len(nodes)}")
     new = Image.new(mode="RGB", size=map.size)
