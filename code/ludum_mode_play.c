@@ -9,15 +9,15 @@
 #define LD_SHORT_RADIO_TAG   0x4821
 #define LD_LONG_RADIO_TAG    0x4822
 
-#define LD_CLOUD_MIN_MOVE_SPEED 0.05
-#define LD_CLOUD_MAX_MOVE_SPEED 0.18
+#define LD_CLOUD_MIN_MOVE_SPEED 0.05f
+#define LD_CLOUD_MAX_MOVE_SPEED 0.18f
 
 #define LD_CLOUD_MIN_SPAWN_TIME 4.8f
 #define LD_CLOUD_MAX_SPAWN_TIME 10.2f
 #define LD_CLOUD_SCALE 2.8f
 
 #define LD_CLOUD_VARIATION_COUNT 6
-#define LD_MAX_CLOUDS 4
+#define LD_MAX_CLOUDS 6
 
 #define LD_STATIC_LONG_TIMER_THRESHOLD 5.5f
 
@@ -65,7 +65,7 @@ typedef struct ldCar {
 	f32 nodeProgress;
 	f32 onBreak;
     ldCarDir direction;
-    b8 goToStore;
+    b32 goToStore;
 	ldOrder *assignedOrders[4];
 } ldCar;
 
@@ -151,10 +151,13 @@ struct ldModePlay {
         f32 timer;
 
         f32 min_y;
-        f32 step_y; // y = min_y + (index * step_y)
+        f32 step_y;
 
         v2 max_dim;
 
+        u32 num_pushed;
+
+        u32 index;
         u32 count;
         ldCloudState *free;
         ldCloudState *clouds;
@@ -171,7 +174,7 @@ struct ldModePlay {
     xiLogger log;
 };
 
-static b8 pointInRect(v2 point, rect2 rect) {
+static b32 pointInRect(v2 point, rect2 rect) {
 	return point.x > rect.min.x &&
 		point.x < rect.max.x &&
 		point.y > rect.min.y &&
@@ -321,10 +324,18 @@ static void ludum_cloud_add(ldModePlay *play) {
     if (play->clouds.count < LD_MAX_CLOUDS) {
         ldCloudState *cloud = play->clouds.free;
 
-        if (cloud) { play->clouds.free = cloud->next; }
-        else { cloud = xi_arena_push_type(play->arena, ldCloudState); }
+        if (cloud) {
+            play->clouds.free = cloud->next;
+        }
+        else {
+            cloud = xi_arena_push_type(play->arena, ldCloudState);
 
-        u32 index = play->clouds.count;
+            XI_ASSERT(play->clouds.num_pushed < LD_MAX_CLOUDS);
+            play->clouds.num_pushed += 1;
+        }
+
+        u32 index = play->clouds.index;
+        play->clouds.index = (index + 1) % LD_MAX_CLOUDS;
 
         b32 left = (index & 1);
 
@@ -336,7 +347,7 @@ static void ludum_cloud_add(ldModePlay *play) {
 
         f32 dir = (left ? 1 : -1);
 
-        cloud->layer   = xi_rng_range_f32(rng, 0.83f, 2.95f);
+        cloud->layer   = xi_rng_range_f32(rng, 1.2f, 2.95f);
         cloud->scale   = (xi_rng_choice_u32(rng, 2) ? -1 : 1) * xi_rng_range_f32(rng, 0.88f, 1.11f);
         cloud->speed   = dir * xi_rng_range_f32(rng, LD_CLOUD_MIN_MOVE_SPEED, LD_CLOUD_MAX_MOVE_SPEED);
         cloud->index   = 3; // xi_rng_choice_u32(&play->rng, LD_CLOUD_VARIATION_COUNT);
@@ -532,20 +543,23 @@ static void ludum_mode_play_init(ldContext *ld) {
 static void ludum_store_update(ldModePlay *play, f32 delta) {
 	for(int i = 0; i < play->storeCount; i++) {
 		ldStore *store = &play->stores[i];
+
 		store->nextOrderIn -= delta;
 		if (store->nextOrderIn < 0 && store->orderCount < LD_MAX_STORE_ORDERS) {
             xi_log(&play->log, "order", "new order incoming!");
+
 			ldOrder *order = &store->orders[store->orderCount];
 			order->index = ludum_find_street_node(play, store->index);
+
 			nav_mesh_node *node = &play->nodes[order->index];
 			order->position = xi_v2_create(node->x, node->y);
 			// TODO: change this to how far the shop is away?
 			order->timer = 60;
 			order->assignedDriver = -1;
 			store->orderCount++;
-			store->nextOrderIn = store->orderDelayMin + xi_rng_choice_u32(&play->rng, store->orderDelayMax-store->orderDelayMin)
-;
+			store->nextOrderIn = store->orderDelayMin + xi_rng_choice_u32(&play->rng, store->orderDelayMax-store->orderDelayMin);
 		}
+
 		for(int it = 0; it < store->orderCount; it++) {
 			ldOrder *order = &store->orders[it];
 			order->timer -= delta;
@@ -691,9 +705,7 @@ static void ludum_mode_play_simulate(ldModePlay *play) {
     while (cloud != 0) {
         cloud->p.x += (cloud->speed * dt);
 
-        // 1 -> 2 -> 3
-        // p    c
-        // 1 -> 3
+        XI_ASSERT(!prev || (prev->next == cloud));
 
         f32 min = 1.05f * (play->min_camera.x - play->clouds.max_dim.w);
         f32 max = 1.05f * (play->max_camera.x + play->clouds.max_dim.w);
@@ -711,10 +723,16 @@ static void ludum_mode_play_simulate(ldModePlay *play) {
             //
             cloud->next = play->clouds.free;
             play->clouds.free = cloud;
-        }
 
-        prev  = cloud;
-        cloud = cloud->next;
+            cloud = prev ? prev->next : play->clouds.clouds;
+        }
+        else {
+            // we didn't remove it so this cloud was our previous, otherwise
+            // we don't update the prev because it was removed from the active list
+            //
+            prev  = cloud;
+            cloud = cloud->next;
+        }
     }
 
     // prevent the camera from leaving the map area
@@ -805,16 +823,13 @@ static void ludum_mode_play_render(ldModePlay *play, xiRenderer *renderer) {
     v3 p = xi_v3_from_v2(play->camera_p, play->zoom);
 
     xi_camera_transform_set_from_axes(renderer, x, y, z, p, 0);
-	rect3 cameraBounds = xi_camera_bounds_get(&renderer->camera);
-
-
+	rect3 bounds = xi_camera_bounds_get(&renderer->camera);
 
     xi_v2 map_center = xi_v2_mul_f32(xi_v2_add(play->min_camera, play->max_camera), 0.5f);
     xi_v2 map_bounds = xi_v2_sub(play->max_camera, play->min_camera);
 
     xi_f32 scale = XI_MAX(map_bounds.x, map_bounds.y);
     xi_sprite_draw_xy_scaled(renderer, play->map, map_center, scale, 0);
-
 	// draw cars
 	for(u32 i = 0; i < play->carCount; i++) {
 		/* CAR ROUTE FOR DEBUG
@@ -840,17 +855,37 @@ static void ludum_mode_play_render(ldModePlay *play, xiRenderer *renderer) {
 	// draw stores
 	for(u32 i = 0; i < play->storeCount; i++) {
         xi_sprite_draw_xy_scaled(renderer, play->storeMarker, play->stores[i].position, 0.1, 0);
+
 		for(u32 it = 0; it < play->stores[i].orderCount; it++) {
-			ldOrder order = play->stores[i].orders[it];
+			ldOrder *order = &play->stores[i].orders[it];
+
 			xiImageHandle marker = play->orderMarkerAssigned;
+
+            v2 pos = order->position;
+            pos.x = XI_CLAMP(order->position.x, bounds.min.x, bounds.max.x);
+            pos.y = XI_CLAMP(order->position.y, bounds.min.y, bounds.max.y);
+
 			if(play->stores[i].orders[it].assignedDriver == -1) {
 				marker = play->orderMarker;
-        		xi_sprite_draw_xy_scaled(renderer, play->orderBubble, order.position, 0.1+xi_sin(order.timer), 0);
+                v4 colour = xi_v4_create(0, 1, 0, 1);
+
+                f32 time_remaining = order->timer / 60.0f; // @hardcode: from above when orders are spawned
+                if (time_remaining < 0.15f) {
+                    colour = xi_v4_create(1.0f, 0.0f, 0.0f, 1.0f);
+                }
+                else if (time_remaining < 0.5f) {
+                    colour = xi_v4_create(1.0f, 0.65f, 0.0f, 1.0f);
+                }
+
+
+        		xi_coloured_sprite_draw_xy_scaled(renderer, play->orderBubble, colour, pos, 0.1+xi_sin(order->timer), 0);
 			}
-        	xi_sprite_draw_xy_scaled(renderer, marker, order.position, 0.1, 0);
+
+        	xi_sprite_draw_xy_scaled(renderer, marker, pos, 0.1, 0);
 		}
 
 	}
+
     xi_quad_outline_draw_xy(renderer, xi_v4_create(1, 0, 0, 1), map_center, map_bounds, 0, 0.02f);
 
     f32 cloud_scale = 2.8f;
