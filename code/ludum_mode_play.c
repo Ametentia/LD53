@@ -1,5 +1,6 @@
 //#define LD_DEFAULT_MIN_ZOOM 12.0f
-#define LD_DEFAULT_MIN_ZOOM 0.70f
+#define LD_INITIAL_MIN_ZOOM 0.7f
+#define LD_DEFAULT_MIN_ZOOM 0.85f
 #define LD_DEFAULT_MAX_ZOOM 4.5f // @incomplete: this will break when we limit zoom
 #define LD_TOTAL_MAX_ZOOM   4.0f
 #define LD_DEBUG_MAX_ZOOM   12.0f
@@ -128,6 +129,8 @@ struct ldModePlay {
 
     f32 max_zoom;
     f32 zoom;
+    f32 target_zoom;
+
 
     struct {
         b32 waiting; // for static to finish playing
@@ -524,9 +527,10 @@ static void ludum_mode_play_init(ldContext *ld) {
         play->ld    = ld;
         play->angle = 0;
 
-        play->zoom     = LD_DEFAULT_MIN_ZOOM;
-        play->max_zoom = LD_TOTAL_MAX_ZOOM;
-        play->camera_p = xi_v2_create(0, 0);
+        play->zoom        = LD_INITIAL_MIN_ZOOM; //LD_DEFAULT_MIN_ZOOM;
+        play->target_zoom = LD_DEFAULT_MIN_ZOOM;
+        play->max_zoom    = LD_TOTAL_MAX_ZOOM;
+        play->camera_p    = xi_v2_create(0, 0);
 
         v2u window_dim   = xi->renderer.setup.window_dim;
         f32 aspect_ratio = (f32) window_dim.w / (f32) window_dim.h;
@@ -537,8 +541,6 @@ static void ludum_mode_play_init(ldContext *ld) {
 
         v3 p = xi_v3_create(0, 0, LD_TOTAL_MAX_ZOOM * 1.25f);
 
-        play->rng.state = xi->time.ticks;
-
         xiCameraTransform full_map;
         xi_camera_transform_get_from_axes(&full_map, aspect_ratio, x, y, z, p, 0);
 
@@ -546,6 +548,8 @@ static void ludum_mode_play_init(ldContext *ld) {
 
         play->min_camera = bounds.min.xy;
         play->max_camera = bounds.max.xy;
+
+        play->rng.state = xi->time.ticks;
 
         ludum_clouds_init(play, &xi->assets);
 
@@ -594,16 +598,23 @@ static void ludum_mode_play_init(ldContext *ld) {
 		play->storeCount = 1;
 		ludum_store_init(play, &xi->assets);
 		ludum_car_init(play, &xi->assets);
+
 		play->selectedCar = -1;
+
         play->carImages[LD_CAR_DIR_FRONT] = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("car_front"));
-        play->carImages[LD_CAR_DIR_SIDE] = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("car_side"));
-        play->carImages[LD_CAR_DIR_BACK] = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("car_back"));
+        play->carImages[LD_CAR_DIR_SIDE]  = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("car_side"));
+        play->carImages[LD_CAR_DIR_BACK]  = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("car_back"));
+
         play->carImages[LD_CAR_DIR_FRONT_SELECTED] = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("car_front_selected"));
-        play->carImages[LD_CAR_DIR_SIDE_SELECTED] = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("car_side_selected"));
-        play->carImages[LD_CAR_DIR_BACK_SELECTED] = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("car_back_selected"));
-        play->licenseHandle = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("license_01"));
-        play->order_empty_handle = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("empty_order"));
+        play->carImages[LD_CAR_DIR_SIDE_SELECTED]  = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("car_side_selected"));
+        play->carImages[LD_CAR_DIR_BACK_SELECTED]  = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("car_back_selected"));
+
+        play->licenseHandle       = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("license_01"));
+        play->order_empty_handle  = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("empty_order"));
         play->order_filled_handle = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("order_filled"));
+
+        ldStore *store = &play->stores[0];
+        play->camera_p = store->position;
 
         ld->mode = LD_MODE_PLAY;
     }
@@ -780,8 +791,20 @@ static void ludum_mode_play_simulate(ldModePlay *play) {
 
     // handle camera movement
     //
-    play->zoom += (1.88f * mouse->delta.wheel.y * dt);
-    play->zoom  = XI_CLAMP(play->zoom, LD_DEFAULT_MIN_ZOOM, play->max_zoom);
+    if (mouse->delta.wheel.y != 0) {
+        play->zoom += (1.88f * mouse->delta.wheel.y * dt);
+        play->zoom  = XI_CLAMP(play->zoom, LD_DEFAULT_MIN_ZOOM, play->max_zoom);
+
+        play->target_zoom = play->zoom;
+    }
+    else if (play->zoom < play->target_zoom) {
+        if (play->target_zoom - play->zoom < 0.01f) {
+            play->target_zoom = play->zoom;
+        }
+        else {
+            play->zoom += 0.1f * ((play->target_zoom - play->zoom) * dt);
+        }
+    }
 
 	if (mouse->left.pressed && xi_v2_length(mouse->delta.clip) == 0) {
 		b8 orderAssigned = false;
@@ -856,6 +879,8 @@ static void ludum_mode_play_simulate(ldModePlay *play) {
 	} else if (mouse->left.down) {
 		v2 dist = xi_v2_mul_f32(xi_v2_neg(mouse->delta.clip), 0.88f * play->zoom);
 		play->camera_p = xi_v2_add(play->camera_p, dist);
+
+        play->zoom  = XI_CLAMP(play->zoom, LD_DEFAULT_MIN_ZOOM, play->max_zoom);
     }
 
     p = xi_v3_from_v2(play->camera_p, play->zoom);
@@ -1097,6 +1122,7 @@ static void ludum_mode_play_render(ldModePlay *play, xiRenderer *renderer) {
         cloud = cloud->next;
     }
 
+#if 0
     cloud = play->clouds.clouds;
     while (cloud != 0) {
         // :note clouds are in layer sorted order so this is safe for transparency order.
@@ -1116,15 +1142,17 @@ static void ludum_mode_play_render(ldModePlay *play, xiRenderer *renderer) {
 
         cloud = cloud->next;
     }
+#endif
 
 	renderer->layer = 0;
     x = xi_v3_create(3, 0, 0);
     y = xi_v3_create(0, 3, 0);
     z = xi_v3_create(0, 0, 3);
-    p = xi_v3_create(0, 0, 3);
+    p = xi_v3_create(0, 0, 1);
 
-    xi_camera_transform_set_from_axes(renderer, x, y, z, p, XI_CAMERA_TRANSFORM_FLAG_ORTHOGRAPHIC);
-	if(play->selectedCar != -1) {
+    xi_camera_transform_set(renderer, x, y, z, p, XI_CAMERA_TRANSFORM_FLAG_ORTHOGRAPHIC, -1000, 1000, 0.5);
+
+	if (play->selectedCar != -1) {
     	xi_sprite_draw_xy(renderer, play->licenseHandle, xi_v2_create(0.25, -0.15), xi_v2_create(0.15, 0.15), 0);
 		ldCar car = play->cars[play->selectedCar];
 		for(u32 i = 0; i < LD_MAX_CAR_ORDERS; i++) {

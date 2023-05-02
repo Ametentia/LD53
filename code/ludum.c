@@ -52,13 +52,13 @@ extern XI_EXPORT XI_GAME_INIT(xiContext *xi, xi_u32 type) {
             //
             xiAudioPlayer *audio = &xi->audio_player;
 
-            audio->volume = 0.5f;
+            audio->volume = 0.2f;
 
-            audio->music.playing     = true; // no music for now :enable
+            audio->music.playing     = true;
             audio->music.volume      = 0.8f;
             audio->music.layer_limit = 16;
 
-            audio->sfx.volume = 1.0f;
+            audio->sfx.volume = 0.8f;
             audio->sfx.limit  = 32;
         }
         break;
@@ -77,7 +77,7 @@ extern XI_EXPORT XI_GAME_INIT(xiContext *xi, xi_u32 type) {
 
             // ludum_mode_play_init(ld);
             //
-            ludum_mode_menu_init(ld);
+            ludum_mode_menu_init(ld, false, true);
 
             xi->user = ld;
 
