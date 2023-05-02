@@ -148,6 +148,8 @@ struct ldModePlay {
 	u32 carCount;
 	ldCar cars[25];
     xiImageHandle carImages[6];
+    xiImageHandle aliens[7];
+    xiImageHandle reviewAlien;
 	xiImageHandle licenseHandle;
 	xiImageHandle reviewHandle;
     xiImageHandle star;
@@ -616,6 +618,14 @@ static void ludum_mode_play_init(ldContext *ld) {
         play->carImages[LD_CAR_DIR_FRONT_SELECTED] = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("car_front_selected"));
         play->carImages[LD_CAR_DIR_SIDE_SELECTED] = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("car_side_selected"));
         play->carImages[LD_CAR_DIR_BACK_SELECTED] = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("car_back_selected"));
+        play->aliens[0] = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("alien_0"));
+        play->aliens[1] = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("alien_1"));
+        play->aliens[2] = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("alien_2"));
+        play->aliens[3] = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("alien_3"));
+        play->aliens[4] = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("alien_4"));
+        play->aliens[5] = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("alien_5"));
+        play->aliens[6] = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("alien_6"));
+		play->aliens[xi_rng_choice_u32(&play->rng, 7)];
         play->licenseHandle = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("license_01"));
         play->reviewHandle = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("review_bg"));
         play->newStoreNote = xi_image_get_by_name_str(&xi->assets, xi_str_wrap_cstr("new_restaurant"));
@@ -674,8 +684,27 @@ static void ludum_store_update(ldModePlay *play, f32 delta) {
 
 		for(int it = 0; it < LD_MAX_STORE_ORDERS; it++) {
 			ldOrder *order = &store->orders[it];
-			if(!order->free)
+			if(!order->free) {
 				order->timer -= delta;
+				if(order->timer < -20) {
+					if(order->assignedDriver != -1) {
+						ldCar *car = &play->cars[order->assignedDriver];
+						car->orderCount = car->orderCount-1;
+					}
+					play->stars = 0;
+					play->starTimer = 4;
+					play->reviewAlien = play->aliens[xi_rng_choice_u32(&play->rng, 7)];
+					if(play->deliveries == 0) {
+						play->playerStars = play->stars;
+					}
+					else {
+						play->playerStars += play->stars;
+					}
+					play->deliveries++;
+					xi_log(&play->log, "stars", "play->starts %d", play->stars);
+					order->free = true;
+				}
+			}
 		}
 	}
 }
@@ -721,23 +750,22 @@ static void ludum_car_update(ldModePlay *play, f32 delta, xiAudioPlayer *player)
 			car->currentRouteStopTarget -= 1;
 			car->currentRouteIndex = endStop;
 
-			if(car->currentRouteStopTarget == 0) { // car->route.stop_count){
+			if(car->currentRouteStopTarget == 0) { // car->route.stop_count)
 				if(car->orderCount!=0) {
 					ldOrder *order = car->assignedOrders[car->currentOrder];
 					if(!order->collected) {
 						if(car->currentRouteIndex == order->store->index) {
 							order->collected = true;
 							car->route = generateRoute(play->arena, &NAV_MESH, endStop, order->index);
-							car->currentRouteStopTarget = car->route.stop_count - 1;
 						} else {
 							car->route = generateRoute(play->arena, &NAV_MESH, endStop, order->store->index);
-							car->currentRouteStopTarget = car->route.stop_count - 1;
 						}
 					} else {
 						car->orderCount--;
         				xi_sound_effect_play(player, play->successDelivery, 0x222, 0.8);
 						play->stars = XI_CLAMP((order->timer+20)/10, 0, 5);
 						play->starTimer = 4;
+						play->reviewAlien = play->aliens[xi_rng_choice_u32(&play->rng, 7)];
 						if(play->deliveries == 0) {
 							play->playerStars = play->stars;
 						}
@@ -753,18 +781,18 @@ static void ludum_car_update(ldModePlay *play, f32 delta, xiAudioPlayer *player)
 							order = car->assignedOrders[car->currentOrder];
 							do {
 								car->route = generateRoute(play->arena, &NAV_MESH, endStop, order->store->index);
-								car->currentRouteStopTarget = car->route.stop_count - 1;
 							} while(car->route.stop_count == 0);
 						} else {
 							do {
 								car->route = generateRoute(play->arena, &NAV_MESH, endStop, play->stores[xi_rng_choice_u32(&play->rng, play->storeCount)].index);
-								car->currentRouteStopTarget = car->route.stop_count - 1;
 							} while(car->route.stop_count == 0);
 						}
 					}
 
 				} else {
-					car->route = generateRoute(play->arena, &NAV_MESH, endStop, play->stores[xi_rng_choice_u32(&play->rng, play->node_count)].index);
+					do {
+						car->route = generateRoute(play->arena, &NAV_MESH, endStop, xi_rng_choice_u32(&play->rng, play->node_count));
+					} while(car->route.stop_count == 0);
 					car->onBreak = 1.5f;
 				}
 				car->currentRouteStopTarget = car->route.stop_count - 1;
@@ -845,9 +873,13 @@ static void ludum_mode_play_simulate(ldModePlay *play) {
 						v3 mouseUnprojectedV3 = xi_unproject_xy(&camera, mouse->position.clip);
 						v2 mouseUnprojected = xi_v2_create(mouseUnprojectedV3.x, mouseUnprojectedV3.y);
 						if(pointInRect(mouseUnprojected, orderHitbox) && order->assignedDriver==-1) {
-							if(car->orderCount==0){
+							if(car->orderCount == 0 && car->currentRouteIndex != order->store->index) {
 								car->route = generateRoute(play->arena, &NAV_MESH, car->currentRouteIndex, order->store->index);
 								car->currentOrder = car->orderOffset;
+								car->currentRouteStopTarget = car->route.stop_count - 1;
+							} else if (car->orderCount == 0){
+								order->collected=true;
+								car->route = generateRoute(play->arena, &NAV_MESH, car->currentRouteIndex, order->index);
 								car->currentRouteStopTarget = car->route.stop_count - 1;
 							}
 							car->assignedOrders[car->orderOffset] = order;
@@ -1219,6 +1251,8 @@ static void ludum_mode_play_render(ldModePlay *play, xiRenderer *renderer) {
 	}
 	if(play->starTimer > 0) {
 		xi_sprite_draw_xy(renderer, play->reviewHandle, xi_v2_create(-0.25, -0.15), xi_v2_create(0.15, 0.15), 0);
+		xi_sprite_draw_xy(renderer, play->reviewAlien, xi_v2_create(-0.29, -0.149), xi_v2_create(0.035, 0.035), 0);
+
 		for(u32 i = 0; i < 5; i++) {
 			if(i <= play->stars) {
 				xi_sprite_draw_xy(renderer, play->star, xi_v2_create(-0.20-i*0.015, -0.148), xi_v2_create(0.015, 0.015), 0);
