@@ -20,7 +20,7 @@ extern XI_EXPORT XI_GAME_INIT(xiContext *xi, xi_u32 type) {
 
             xi->time.delta.fixed_hz = 60;
 
-            xi->system.console_open = true;
+            xi->system.console_open = false;
 
             // setup assets
             //
@@ -28,7 +28,7 @@ extern XI_EXPORT XI_GAME_INIT(xiContext *xi, xi_u32 type) {
 
             xi_string exe_path = xi->system.executable_path;
 
-            assets->importer.enabled       = true;
+            assets->importer.enabled       = false;
             assets->importer.search_dir    = xi_str_format(temp, "%.*s/../assets", xi_str_unpack(exe_path));
             assets->importer.sprite_prefix = xi_str_wrap_const("sprite_");
 
